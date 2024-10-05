@@ -86,6 +86,29 @@ Rectangle RectangleCorners(Vector2 topLeft, Vector2 bottomRight) {
     return (Rectangle) {topLeft.x, topLeft.y, bottomRight.x - topLeft.x, bottomRight.y - topLeft.y};
 }
 
+Vector2 RectangleTopLeft(Rectangle rect) {
+    return (Vector2){rect.x, rect.y};
+}
+
+Vector2 RectangleBottomRight(Rectangle rect) {
+    return (Vector2){rect.x + rect.width, rect.y + rect.height};
+}
+
+float RectangleLeft(Rectangle rect) {
+    return rect.x;
+}
+
+float RectangleTop(Rectangle rect) {
+    return rect.y;
+}
+
+float RectangleRight(Rectangle rect) {
+    return rect.x + rect.width;
+}
+
+float RectangleBottom(Rectangle rect) {
+    return rect.y + rect.height;
+}
 
 ////////////////////////////////////////////
 // ..Images
@@ -179,11 +202,15 @@ void getBoidsIn(BoidMap* boidMap, Vector2 position, float radius, Array* output)
 
 
 
-#define BOID_VISION_RADIUS 100
-#define BOID_SEPARATION_C 10
-#define BOID_ALIGNMENT_C 10
-#define BOID_COHESION_C 10
-#define BOID_SPEED 200
+#define BOID_VISION_RADIUS 40
+#define BOID_AVOIDANCE_RADIUS 16
+#define BOID_SEPARATION_C 50
+#define BOID_ALIGNMENT_C 50
+#define BOID_COHESION_C 0.5
+#define BOID_WALL_C 2000.0
+#define BOID_MIN_SPEED 100
+#define BOID_MAX_SPEED 200
+#define BOID_WALL_VISION_RADIUS 100
 
 void clearBoidMap(BoidMap* boidMap) {
     for ITERATE(i, boidMap->chunks.used) {
@@ -215,44 +242,59 @@ void populateBoidMap(BoidMap* boidMap, Array* boids) {
 }
 
 void spawnBoid(World* world, Vector2 position) {
-    Boid boid = {position, (Vector2){BOID_SPEED, 0}};
+    Boid boid = {position, (Vector2){BOID_MAX_SPEED, 0}};
     aAppend(&world->boids, &boid);
     printf("SPAWN BOID\n");
 }
 
-void boidsReact(Array* boids, BoidMap* boidMap) {
+void boidsReact(Array* boids, BoidMap* boidMap, Rectangle bounds, float delta) {
 
     Array flockBoids = aCreate(128, sizeof(Boid*));
     for ITERATE(i, boids->used) {
         flockBoids.used = 0;
         Boid* boid = aGet(boids, i);
         getBoidsIn(boidMap, boid->position, BOID_VISION_RADIUS, &flockBoids);
-        int otherFlockBirdCount = flockBoids.used - 1;
 
-        if (otherFlockBirdCount <= 0) continue;
+        Vector2 separationForce = Vector2Zero();
+        Vector2 alignmentForce  = Vector2Zero();
+        Vector2 cohesionForce   = Vector2Zero();
+        Vector2 wallForce   = Vector2Zero();
 
-        Vector2 totalDisplacement = Vector2Zero();
-        Vector2 totalVelocity = Vector2Zero();
-        Vector2 totalPosition = Vector2Zero();
+        if (flockBoids.used) {
+            Vector2 totalDisplacement = Vector2Zero();
+            Vector2 totalVelocity = Vector2Zero();
+            Vector2 totalPosition = Vector2Zero();
 
-        for ITERATE(j, flockBoids.used) {
-            Boid* flockBoid = *(Boid**) aGet(&flockBoids, j);
-            if (flockBoid == boid) continue;
+            for ITERATE(j, flockBoids.used) {
+                Boid* flockBoid = *(Boid**) aGet(&flockBoids, j);
+                //if (flockBoid == boid) continue;
 
-            Vector2 displacement = Vector2Subtract(boid->position, flockBoid->position);
-            totalDisplacement = Vector2Add(totalDisplacement, displacement);    // separation: steer to avoid crowding local flockmates
-            totalVelocity = Vector2Add(totalVelocity, flockBoid->velocity);     // alignment: steer towards the average heading of local flockmates
-            totalPosition = Vector2Add(totalPosition, flockBoid->position);     // cohesion: steer to move towards the average position (center of mass) of local flockmates
+                Vector2 displacement = Vector2Subtract(boid->position, flockBoid->position);
+                if (Vector2LengthSqr(displacement) <= BOID_AVOIDANCE_RADIUS * BOID_AVOIDANCE_RADIUS) 
+                    totalDisplacement = Vector2Add(totalDisplacement, displacement); // separation: steer to avoid crowding local flockmates
+                totalVelocity = Vector2Add(totalVelocity, flockBoid->velocity);      // alignment: steer towards the average heading of local flockmates
+                totalPosition = Vector2Add(totalPosition, flockBoid->position);      // cohesion: steer to move towards the average position (center of mass) of local flockmates
+            }
+
+            separationForce = Vector2Scale(totalDisplacement, BOID_SEPARATION_C);
+            alignmentForce  = Vector2Scale(totalVelocity  , BOID_ALIGNMENT_C / flockBoids.used);
+            cohesionForce   = Vector2Scale(Vector2Subtract(Vector2Scale(totalPosition, 1.0 / flockBoids.used), boid->position), BOID_COHESION_C);
         }
-
         
-        Vector2 separationForce = Vector2Scale(totalDisplacement, BOID_SEPARATION_C);
-        Vector2 alignmentForce  = Vector2Scale(totalVelocity  , BOID_ALIGNMENT_C / otherFlockBirdCount);
-        Vector2 cohesionForce   = Vector2Scale(Vector2Subtract(boid->position, Vector2Scale(totalPosition, 1 / otherFlockBirdCount)), BOID_COHESION_C);
-
-        Vector2 force = Vector2Add(Vector2Add(separationForce, alignmentForce), cohesionForce);
         
-        boid->velocity = Vector2Scale(Vector2Normalize(force), BOID_SPEED);
+        if (fabs(boid->position.x - RectangleLeft(bounds)) < BOID_WALL_VISION_RADIUS)   wallForce.x += 1;
+        if (fabs(boid->position.x - RectangleRight(bounds)) < BOID_WALL_VISION_RADIUS)  wallForce.x -= 1;
+        if (fabs(boid->position.y - RectangleTop(bounds)) < BOID_WALL_VISION_RADIUS)    wallForce.y += 1;
+        if (fabs(boid->position.y - RectangleBottom(bounds)) < BOID_WALL_VISION_RADIUS) wallForce.y -= 1;
+
+        wallForce = Vector2Scale(wallForce, BOID_WALL_C);
+
+        Vector2 force = Vector2Add(Vector2Add(Vector2Add(separationForce, alignmentForce), cohesionForce), wallForce);
+
+        if (Vector2Length(force)) {
+            boid->velocity = Vector2Add(boid->velocity, Vector2Scale(force, delta));
+            boid->velocity = Vector2Scale(Vector2Normalize(boid->velocity), Clamp(Vector2Length(boid->velocity), BOID_MIN_SPEED, BOID_MAX_SPEED));
+        }
     }
 
     aFree(&flockBoids);
@@ -262,10 +304,7 @@ void boidsMove(Array* boids, Rectangle bounds, float delta) {
     for ITERATE(i, boids->used) {
          Boid* boid = aGet(boids, i);
          boid->position = Vector2Add(boid->position, Vector2Scale(boid->velocity, delta));
-         while (boid->position.x < 0)               boid->position.x += bounds.width;
-         while (boid->position.x >= bounds.width)   boid->position.x -= bounds.width;
-         while (boid->position.y < 0)               boid->position.y += bounds.height;
-         while (boid->position.y >= bounds.height)  boid->position.y -= bounds.height;
+         boid->position = Vector2Clamp(boid->position, RectangleTopLeft(bounds), Vector2Subtract(RectangleBottomRight(bounds), Vector2Side(0.001)));
     }
 }
 
@@ -328,10 +367,12 @@ int main(void) {
             spawnBoid(&currentWorld, GetMousePosition());
         }
 
+        Rectangle bounds = (Rectangle){0, 0, screenWidth, screenHeight};
+
         clearBoidMap(&currentWorld.boidMap);
         populateBoidMap(&currentWorld.boidMap, &currentWorld.boids);
-        boidsReact(&currentWorld.boids, &currentWorld.boidMap);
-        boidsMove(&currentWorld.boids, (Rectangle){0, 0, screenWidth, screenHeight}, FIXED_DELTA);
+        boidsReact(&currentWorld.boids, &currentWorld.boidMap, bounds, FIXED_DELTA);
+        boidsMove(&currentWorld.boids, bounds, FIXED_DELTA);
         
         // Draw
         //----------------------------------------------------------------------------------
