@@ -1,0 +1,25 @@
+{
+  "configurations": [
+    {
+      "name": "windows-gcc-x64",
+      "includePath": [
+        "${workspaceFolder}/**",
+        "${env:MINGW64}/x86_64-w64-mingw32/include/**",
+        "${env:RAYLIB_5}/include/**"
+      ],
+      "defines": [
+        "_DEBUG",
+        "UNICODE",
+        "_UNICODE",
+        "GRAPHICS_API_OPENGL_33",
+        "PLATFORM_DESKTOP"
+      ],
+      "compilerPath": "${env:MINGW64}/bin/gcc.exe",
+      "cStandard": "c17",
+      "cppStandard": "c++17",
+      "intelliSenseMode": "windows-gcc-x64",
+      "configurationProvider": "ms-vscode.cmake-tools"
+    }
+  ],
+  "version": 4
+}
