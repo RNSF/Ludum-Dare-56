@@ -8,7 +8,7 @@
 
 #define ITERATE(IDX, LEN) (size_t IDX = 0; IDX < LEN; IDX++)
 #define DEBUG_ENABLED true
-#define CHUNK_SIZE (Vector2){20, 20}
+#define CHUNK_SIZE (Vector2){16, 16}
 #define FPS 60
 #define FIXED_DELTA 1.0/FPS
 #define BOID_CHUNK_MAX 32
@@ -38,9 +38,17 @@ typedef struct BoidChunk {
     int boidCount;
 } BoidChunk;
 
+typedef struct Snake {
+    Vector2 position;
+    Vector2 velocity;
+} Snake;
+
 typedef struct World {
     Array boids;
     BoidMap boidMap;
+    Snake snake;
+    Rectangle bounds;
+    Rectangle waterBounds;
 } World;
 
 
@@ -86,12 +94,20 @@ Rectangle RectangleCorners(Vector2 topLeft, Vector2 bottomRight) {
     return (Rectangle) {topLeft.x, topLeft.y, bottomRight.x - topLeft.x, bottomRight.y - topLeft.y};
 }
 
+Vector2 RectangleSize(Rectangle rect) {
+    return (Vector2){rect.width, rect.height};
+}
+
 Vector2 RectangleTopLeft(Rectangle rect) {
     return (Vector2){rect.x, rect.y};
 }
 
 Vector2 RectangleBottomRight(Rectangle rect) {
     return (Vector2){rect.x + rect.width, rect.y + rect.height};
+}
+
+Vector2 RectangleCenter(Rectangle rect) {
+    return (Vector2){rect.x + rect.width / 2, rect.y + rect.height / 2};
 }
 
 float RectangleLeft(Rectangle rect) {
@@ -203,14 +219,19 @@ void getBoidsIn(BoidMap* boidMap, Vector2 position, float radius, Array* output)
 
 
 #define BOID_VISION_RADIUS 40
-#define BOID_AVOIDANCE_RADIUS 16
+#define BOID_SEPARATION_RADIUS 16
+#define BOID_AVOIDANCE_RADIUS 100
+#define BOID_WALL_VISION_RADIUS 100
+
 #define BOID_SEPARATION_C 50
 #define BOID_ALIGNMENT_C 50
 #define BOID_COHESION_C 0.5
 #define BOID_WALL_C 2000.0
+#define BOID_AVOIDANCE_C 8000.0
+
 #define BOID_MIN_SPEED 100
 #define BOID_MAX_SPEED 200
-#define BOID_WALL_VISION_RADIUS 100
+
 
 void clearBoidMap(BoidMap* boidMap) {
     for ITERATE(i, boidMap->chunks.used) {
@@ -227,12 +248,12 @@ void populateBoidMap(BoidMap* boidMap, Array* boids) {
         BoidChunk* boidChunk = getChunk(boidMap, getChunkPosition(boid->position));
         
         if (!boidChunk) {
-            printf("Boid outside of world!");
+           //  printf("Boid outside of world!");
             return;
         }
 
         if (boidChunk->boidCount >= BOID_CHUNK_MAX) {
-            printf("Boid chunk overflow!");;
+           //  printf("Boid chunk overflow!");;
             return;
         }
 
@@ -244,10 +265,10 @@ void populateBoidMap(BoidMap* boidMap, Array* boids) {
 void spawnBoid(World* world, Vector2 position) {
     Boid boid = {position, (Vector2){BOID_MAX_SPEED, 0}};
     aAppend(&world->boids, &boid);
-    printf("SPAWN BOID\n");
+    //printf("SPAWN BOID\n");
 }
 
-void boidsReact(Array* boids, BoidMap* boidMap, Rectangle bounds, float delta) {
+void boidsReact(Array* boids, BoidMap* boidMap, Rectangle bounds, Vector2 pointToAvoid, float delta) {
 
     Array flockBoids = aCreate(128, sizeof(Boid*));
     for ITERATE(i, boids->used) {
@@ -258,6 +279,7 @@ void boidsReact(Array* boids, BoidMap* boidMap, Rectangle bounds, float delta) {
         Vector2 separationForce = Vector2Zero();
         Vector2 alignmentForce  = Vector2Zero();
         Vector2 cohesionForce   = Vector2Zero();
+        Vector2 avoidanceForce  = Vector2Zero();
         Vector2 wallForce   = Vector2Zero();
 
         if (flockBoids.used) {
@@ -270,8 +292,8 @@ void boidsReact(Array* boids, BoidMap* boidMap, Rectangle bounds, float delta) {
                 //if (flockBoid == boid) continue;
 
                 Vector2 displacement = Vector2Subtract(boid->position, flockBoid->position);
-                if (Vector2LengthSqr(displacement) <= BOID_AVOIDANCE_RADIUS * BOID_AVOIDANCE_RADIUS) 
-                    totalDisplacement = Vector2Add(totalDisplacement, displacement); // separation: steer to avoid crowding local flockmates
+                if (Vector2LengthSqr(displacement) <= BOID_SEPARATION_RADIUS * BOID_SEPARATION_RADIUS) 
+                    totalDisplacement = Vector2Add(totalDisplacement, displacement); // separation: s BOID_AVOIDANCE_RADIUS 40teer to avoid crowding local flockmates
                 totalVelocity = Vector2Add(totalVelocity, flockBoid->velocity);      // alignment: steer towards the average heading of local flockmates
                 totalPosition = Vector2Add(totalPosition, flockBoid->position);      // cohesion: steer to move towards the average position (center of mass) of local flockmates
             }
@@ -289,7 +311,12 @@ void boidsReact(Array* boids, BoidMap* boidMap, Rectangle bounds, float delta) {
 
         wallForce = Vector2Scale(wallForce, BOID_WALL_C);
 
-        Vector2 force = Vector2Add(Vector2Add(Vector2Add(separationForce, alignmentForce), cohesionForce), wallForce);
+        Vector2 avoidanceDisplacement = Vector2Subtract(boid->position, pointToAvoid);
+        float avoidanceDisplacementLengthSqr = Vector2LengthSqr(avoidanceDisplacement);
+        if (avoidanceDisplacementLengthSqr < BOID_AVOIDANCE_RADIUS * BOID_AVOIDANCE_RADIUS)
+            avoidanceForce = Vector2Scale(Vector2Normalize(avoidanceDisplacement), BOID_AVOIDANCE_C);
+
+        Vector2 force = Vector2Add(Vector2Add(Vector2Add(Vector2Add(separationForce, alignmentForce), cohesionForce), wallForce), avoidanceForce);
 
         if (Vector2Length(force)) {
             boid->velocity = Vector2Add(boid->velocity, Vector2Scale(force, delta));
@@ -312,19 +339,55 @@ void boidsRender(Array* boids)
 {
     for ITERATE(i, boids->used) {
         Boid* boid = aGet(boids, i);
-        DrawCircle(boid->position.x, boid->position.y, 5, BLACK);
+        DrawCircle(boid->position.x, boid->position.y, 2, WHITE);
     }
 }
+
+
+////////////////////////////////////////////
+// ..Snake
+////////////////////////////////////////////
+
+#define SNAKE_MAX_SPEED 300
+#define SNAKE_ACCELERATION 600
+
+
+void snakeUpdate(Snake* snake, float delta) {
+    Vector2 targetDirection = Vector2Normalize((Vector2) {
+        IsKeyDown(KEY_D) - IsKeyDown(KEY_A),
+        IsKeyDown(KEY_S) - IsKeyDown(KEY_W),
+    });
+
+    Vector2 targetVelocity = Vector2Scale(targetDirection, SNAKE_MAX_SPEED);
+    Vector2 velocityDifference = Vector2Subtract(targetVelocity, snake->velocity);
+    Vector2 accelerationDirection = Vector2Normalize(velocityDifference);
+    snake->velocity = Vector2Add(snake->velocity, Vector2ClampValue(Vector2Scale(accelerationDirection, SNAKE_ACCELERATION * delta), 0, Vector2Length(velocityDifference)));
+    snake->velocity = Vector2ClampValue(snake->velocity, 0, SNAKE_MAX_SPEED);
+}
+
+void snakeMove(Snake* snake, float delta) {
+    snake->position = Vector2Add(snake->position, Vector2Scale(snake->velocity, delta));
+}
+
+void snakeRender(Snake* snake) {
+    DrawCircle(snake->position.x, snake->position.y, 14, WHITE);
+}
+
 
 
 ////////////////////////////////////////////
 // ..World
 ////////////////////////////////////////////
 
-void initWorld(World* world, Vector2 chunkCount)
+void initWorld(World* world, Rectangle bounds, float waterLine)
 {
     world->boids = aCreate(128, sizeof(Boid));
-    initBoidMap(&world->boidMap, chunkCount);
+    initBoidMap(&world->boidMap, Vector2Ceil(Vector2Divide(RectangleSize(bounds), CHUNK_SIZE)));
+    world->snake.position = RectangleCenter(bounds);
+    world->bounds = bounds;
+    world->waterBounds = bounds;
+    world->waterBounds.y += waterLine;
+    world->waterBounds.height -= waterLine;
 }
 
 void cleanWorld(World* world)
@@ -345,13 +408,12 @@ void cleanWorld(World* world)
 int main(void) {
     // Initialization
     //--------------------------------------------------------------------------------------
-    const int screenWidth = 800;
-    const int screenHeight = 450;
+    Vector2 screenSize = (Vector2){800, 800};
 
     World currentWorld;
-    initWorld(&currentWorld, (Vector2){ceil(screenWidth / CHUNK_SIZE.x), ceil(screenHeight / CHUNK_SIZE.y)});
+    initWorld(&currentWorld, RectangleFromSize(screenSize), 200.0);
 
-    InitWindow(screenWidth, screenHeight, "raylib [core] example - basic window");
+    InitWindow(screenSize.x, screenSize.y, "raylib [core] example - basic window");
 
     SetTargetFPS(60);               // Set our game to run at 60 frames-per-second
     //--------------------------------------------------------------------------------------
@@ -363,26 +425,34 @@ int main(void) {
         // TODO: Update your variables here
         //----------------------------------------------------------------------------------
         
-        if (IsMouseButtonDown(MOUSE_BUTTON_LEFT)) {
-            spawnBoid(&currentWorld, GetMousePosition());
+        if (IsMouseButtonPressed(MOUSE_BUTTON_LEFT)) {
+            Vector2 spawnSize = (Vector2){20, 20};
+            Vector2 spawnTopLeft = Vector2Subtract(GetMousePosition(), Vector2Scale(spawnSize, 0.5));
+            for ITERATE(x, spawnSize.x)
+            for ITERATE(y, spawnSize.y) {
+                spawnBoid(&currentWorld, Vector2Add(spawnTopLeft, (Vector2){x, y}));
+            }
+            
         }
-
-        Rectangle bounds = (Rectangle){0, 0, screenWidth, screenHeight};
 
         clearBoidMap(&currentWorld.boidMap);
         populateBoidMap(&currentWorld.boidMap, &currentWorld.boids);
-        boidsReact(&currentWorld.boids, &currentWorld.boidMap, bounds, FIXED_DELTA);
-        boidsMove(&currentWorld.boids, bounds, FIXED_DELTA);
+        boidsReact(&currentWorld.boids, &currentWorld.boidMap, currentWorld.waterBounds, currentWorld.snake.position, FIXED_DELTA);
+        boidsMove(&currentWorld.boids, currentWorld.waterBounds, FIXED_DELTA);
+
+        snakeUpdate(&currentWorld.snake, FIXED_DELTA);
+        snakeMove(&currentWorld.snake, FIXED_DELTA);
         
         // Draw
         //----------------------------------------------------------------------------------
         BeginDrawing();
 
-            ClearBackground(RAYWHITE);
+            ClearBackground(BLACK);
 
             boidsRender(&currentWorld.boids);
+            snakeRender(&currentWorld.snake);
 
-            DrawText("Congrats! You created your first window!", 190, 200, 20, LIGHTGRAY);
+            //DrawText("Congrats! You created your first window!", 190, 200, 20, LIGHTGRAY);
 
         EndDrawing();
         //----------------------------------------------------------------------------------
