@@ -10,7 +10,7 @@
                 "-m64",
                 "-O0",
                 "-Wall",
-                //"-mwindows",
+                "-mwindows",
                 "${workspaceFolder}/src/*.c",
                 "-o",
                 "${workspaceFolder}/build/debug/game.exe",
@@ -43,9 +43,10 @@
                 "-std=c17",
                 "-m64",
                 "-Ofast",
-                "-mwindows",                // remove console
+                
                 "${workspaceFolder}/src/*.c",
                 //"${workspaceFolder}/src/my.o",
+                //"-mwindows",                // remove console
                 "-o",
                 "${workspaceFolder}/build/release/game.exe",
                 "-I./src",

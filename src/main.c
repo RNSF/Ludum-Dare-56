@@ -1162,7 +1162,7 @@ void snakeMove(Snake* snake, Rectangle bounds, Array* splashParticles, WaterBody
 
         shakeCamera(loudness * 10.0f);
 
-        printf("SPLASH\n");
+        // printf("SPLASH\n");
     }
 
     // Update nodes
