@@ -1382,9 +1382,9 @@ int main(void) {
         comboFlashPercentage = Lerp(comboFlashPercentage, 0.0, FIXED_DELTA * 5);
         //printf("%f\n", camera.target.x);
 
-        if (IsMouseButtonPressed(MOUSE_BUTTON_LEFT)) {
-            boidExplosiveSpawn(&currentWorld, GetMousePosition(), 400);
-        }
+        // if (IsMouseButtonPressed(MOUSE_BUTTON_LEFT)) {
+        //     boidExplosiveSpawn(&currentWorld, GetMousePosition(), 400);
+        // }
         
         if (gameHasStarted) {
             currentWorld.boidBombSpawnTime -= FIXED_DELTA;
