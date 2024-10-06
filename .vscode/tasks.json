@@ -10,6 +10,7 @@
                 "-m64",
                 "-O0",
                 "-Wall",
+                //"-mwindows",
                 "${workspaceFolder}/src/*.c",
                 "-o",
                 "${workspaceFolder}/build/debug/game.exe",
@@ -21,7 +22,7 @@
                 "-lraylib",
                 "-lopengl32",
                 "-lgdi32",
-                "-lwinmm"
+                "-lwinmm",
             ],
             "options": {
                 "cwd": "${workspaceFolder}"
@@ -43,9 +44,8 @@
                 "-m64",
                 "-Ofast",
                 "-mwindows",                // remove console
-                //"-MT",                      // build without needing c++ redistributable
                 "${workspaceFolder}/src/*.c",
-                "${workspaceFolder}/src/my.o",
+                //"${workspaceFolder}/src/my.o",
                 "-o",
                 "${workspaceFolder}/build/release/game.exe",
                 "-I./src",

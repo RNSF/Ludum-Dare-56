@@ -10,10 +10,9 @@
 //#define _CRT_SECURE_NO_WARNINGS
 
 
-
 #ifndef _DEBUG
 
-#define _MT
+
 #pragma comment(linker, "/SUBSYSTEM:windows /ENTRY:mainCRTStartup")
 
 #endif
@@ -35,6 +34,7 @@
 #define BOID_CHUNK_MAX 32
 
 bool gameHasStarted = false;
+float comboFlashPercentage = 0.0;
 
 ////////////////////////////////////////////
 // ..Enum
@@ -117,6 +117,11 @@ typedef struct SplashParticle {
     float radius;
 } SplashParticle;
 
+typedef struct BloodParticle {
+    Entity entity;
+    float lifetime;
+} BloodParticle;
+
 typedef struct BoidBomb {
     Entity entity;
     unsigned int boidCount;
@@ -127,6 +132,7 @@ typedef struct World {
     Array boids;
     Array boidBombs;
     Array splashParticles;
+    Array bloodParticles;
     BoidMap boidMap;
     Snake snake;
     Rectangle bounds;
@@ -141,6 +147,7 @@ typedef struct World {
 
 Color COLOR_MAIN = WHITE;
 Color COLOR_BG = BLACK;  
+Color COLOR_HIGHLIGHT = RED;
 
 // Blend Color
 Color ColorLerp(Color c1, Color c2, float amount) {
@@ -347,6 +354,7 @@ Sound BOMB_EXPLODE_SOUND;
 Sound EAT_SOUND;
 Sound EAT2_SOUND;
 Sound DASH_SOUND;
+Sound DASH_FAIL_SOUND;
 Sound CAN_DASH_SOUND;
 
 
@@ -361,6 +369,7 @@ void loadSounds() {
     EAT_SOUND = LoadSound("assets/sounds/eat.wav");
     EAT2_SOUND = LoadSound("assets/sounds/eat2.wav");
     DASH_SOUND = LoadSound("assets/sounds/dash.wav");
+    DASH_FAIL_SOUND = LoadSound("assets/sounds/dash_fail.wav");
     CAN_DASH_SOUND = LoadSound("assets/sounds/can_dash.wav");
 
     for ITERATE(i, SOUND_INSTANCE_COUNT) {
@@ -378,12 +387,14 @@ Texture2D PLANE_SPRITE;
 Texture2D MANDIBLE_SPRITE;
 Texture2D STRING_SPRITE;
 Texture2D FISH_ICON_SPRITE;
+Image FISH_WINDOW_ICON;
 
 void loadSprites() {
     PLANE_SPRITE        = LoadTexture("assets/sprites/plane.png");
     MANDIBLE_SPRITE     = LoadTexture("assets/sprites/mandible.png");
     STRING_SPRITE       = LoadTexture("assets/sprites/string.png");
     FISH_ICON_SPRITE    = LoadTexture("assets/sprites/fish_icon.png");
+    FISH_WINDOW_ICON    = LoadImage("assets/sprites/fish_window_icon.png");
 }
 
 ////////////////////////////////////////////
@@ -595,6 +606,49 @@ void splashParticlesRender(Array* splashParticles) {
     for ITERATE(i, splashParticles->used) {
         SplashParticle* splashParticle = aGet(splashParticles, i);
         DrawCircle(splashParticle->entity.position.x, splashParticle->entity.position.y, splashParticle->radius, COLOR_MAIN);
+    }
+}
+
+
+////////////////////////////////////////////
+// ..BloodParticle
+////////////////////////////////////////////
+
+#define BLOOD_PARTICLE_MAX_LIFETIME 1.0
+#define BLOOD_PARTICLE_DAMPENING 0.01
+
+void spawnBloodParticle(Array* bloodParticles, Vector2 position, Vector2 velocity) {
+
+    BloodParticle bloodParticle = {0};
+    bloodParticle.entity.position = position;
+    bloodParticle.entity.velocity = velocity;
+    bloodParticle.lifetime = 0.0;
+    aAppend(bloodParticles, &bloodParticle);
+}
+
+void bloodParticlesMove(Array* bloodParticles, WaterBody* water, float delta) {
+    
+    for ITERATE(i, bloodParticles->used) {
+        BloodParticle* bloodParticle = aGet(bloodParticles, i);
+        bloodParticle->entity.velocity.y += -GRAVITY * delta * 0.2;
+        bloodParticle->entity.velocity = Vector2Scale(Vector2Normalize(bloodParticle->entity.velocity), Vector2Length(bloodParticle->entity.velocity) * pow(BLOOD_PARTICLE_DAMPENING, delta));
+        bloodParticle->lifetime += delta;
+        bloodParticle->entity.position = Vector2Add(bloodParticle->entity.position, Vector2Scale(bloodParticle->entity.velocity, delta));
+
+        bool particleInWater = inWater(water, bloodParticle->entity.position);
+        if (!particleInWater) bloodParticle->entity.flags |= FLAG_DEAD;
+        if (bloodParticle->lifetime >= BLOOD_PARTICLE_MAX_LIFETIME) bloodParticle->entity.flags |= FLAG_DEAD;
+    }
+}
+
+void bloodParticlesRender(Array* bloodParticles) {
+    
+    for ITERATE(i, bloodParticles->used) {
+        BloodParticle* bloodParticle = aGet(bloodParticles, i);
+        Color color = COLOR_HIGHLIGHT;
+        float percentange = Clamp(( bloodParticle->lifetime / BLOOD_PARTICLE_MAX_LIFETIME), 0.0, 1.0);
+        color.a = 255 * (1 - percentange);
+        DrawCircle(bloodParticle->entity.position.x, bloodParticle->entity.position.y, 4 * (1 - percentange), color);
     }
 }
 
@@ -1015,17 +1069,22 @@ void snakeUpdate(Snake* snake, WaterBody* water, float delta) {
         
         
         
-        if (canDash && (IsKeyPressed(KEY_LEFT_SHIFT) || IsKeyPressed(KEY_SPACE))) {
-            // boost
-            snake->entity.velocity = Vector2Scale(targetDirection, SNAKE_BOOST_MAX_SPEED);
-            snake->boostColdownTimer = SNAKE_BOOST_COOLDOWN_TIME;
-            snake->clawStretch += 10;
-            
-            gameHasStarted = true;
-            playSoundInstance(DASH_SOUND, 0.4, RandRange(0.9, 1.1) * 0.6);
-            canDash = false;
+        if (IsKeyPressed(KEY_LEFT_SHIFT) || IsKeyPressed(KEY_SPACE)) {
+            if (canDash) {
+                // boost
+                snake->entity.velocity = Vector2Scale(targetDirection, SNAKE_BOOST_MAX_SPEED);
+                snake->boostColdownTimer = SNAKE_BOOST_COOLDOWN_TIME;
+                snake->clawStretch += 10;
+                
+                gameHasStarted = true;
+                playSoundInstance(DASH_SOUND, 0.4, RandRange(0.9, 1.1) * 0.6);
+                canDash = false;
 
-            shakeCamera(7.0);
+                shakeCamera(7.0);
+            } else {
+                playSoundInstance(DASH_FAIL_SOUND, 1.0, RandRange(0.9, 1.1) * 0.6);
+                snake->boostPercent = 0.0;
+            }
         } else {
             snake->boostPercent = 0.0;
         }
@@ -1126,21 +1185,23 @@ void snakeMove(Snake* snake, Rectangle bounds, Array* splashParticles, WaterBody
 
 void snakeRender(Snake* snake, float time) {
 
+    Color bodyColor = (snake->entity.flags & FLAG_CAN_DASH) ? COLOR_MAIN : ColorLerp(COLOR_MAIN, COLOR_BG, 0.1);
+
     for ITERATE(i, snake->nodes.used - 1) {
         SnakeNode* snakeNode = aGet(&snake->nodes, i + 1);
         float renderRadius = snakeNode->radius + snakeNode->bonusRadius;
-        DrawCircle(snakeNode->position.x, snakeNode->position.y, renderRadius, COLOR_MAIN);
-        DrawCircle(snakeNode->position.x, snakeNode->position.y, renderRadius - Lerp(4, 2, snake->boostColdownTimer / SNAKE_BOOST_COOLDOWN_TIME), COLOR_BG);
+        DrawCircle(snakeNode->position.x, snakeNode->position.y, renderRadius, bodyColor);
+        DrawCircle(snakeNode->position.x, snakeNode->position.y, renderRadius - Lerp(4, 12, pow(snake->boostColdownTimer / SNAKE_BOOST_COOLDOWN_TIME, 0.3)), COLOR_BG);
     }
     
     SnakeNode* snakeNode = aGet(&snake->nodes, 0);
     float renderRadius = snakeNode->radius + snakeNode->bonusRadius;
-    DrawCircle(snake->entity.position.x, snake->entity.position.y, renderRadius, COLOR_MAIN);
-    DrawSpriteAnchoredScaled(MANDIBLE_SPRITE, snake->entity.position, RAD2DEG * snake->rotation - snake->clawStretch * 2, (Vector2){1, 1}, (Vector2){0, 1.2}, COLOR_MAIN);
-    DrawSpriteAnchoredScaled(MANDIBLE_SPRITE, snake->entity.position, RAD2DEG * snake->rotation + snake->clawStretch * 2, (Vector2){1, -1}, (Vector2){0, 1.2}, COLOR_MAIN);
+    DrawCircle(snake->entity.position.x, snake->entity.position.y, renderRadius, bodyColor);
+    DrawSpriteAnchoredScaled(MANDIBLE_SPRITE, snake->entity.position, RAD2DEG * snake->rotation - snake->clawStretch * 2, (Vector2){1, 1}, (Vector2){0, 1.2}, bodyColor);
+    DrawSpriteAnchoredScaled(MANDIBLE_SPRITE, snake->entity.position, RAD2DEG * snake->rotation + snake->clawStretch * 2, (Vector2){1, -1}, (Vector2){0, 1.2}, bodyColor);
 }
 
-void snakeEat(Snake* snake, World* world, Array* boids, Array* boidBombs, float time, float delta) {
+void snakeEat(Snake* snake, World* world, Array* boids, Array* boidBombs, Array* bloodParticles, float time, float delta) {
 
     Vector2 snakeDirection = Vector2Normalize(snake->entity.velocity);
     Vector2 hitboxPosition = Vector2Add(snake->entity.position, Vector2Scale(snakeDirection, 10));
@@ -1155,6 +1216,7 @@ void snakeEat(Snake* snake, World* world, Array* boids, Array* boidBombs, float 
         if (isEaten) {
             boid->entity.flags |= FLAG_DEAD;
             boidsEaten += 1;
+            spawnBloodParticle(bloodParticles, boid->entity.position, Vector2Scale(Vector2Normalize(Vector2Subtract(boid->entity.position, snake->entity.position)), Vector2Length(snake->entity.velocity)));
         }
     }
 
@@ -1165,6 +1227,7 @@ void snakeEat(Snake* snake, World* world, Array* boids, Array* boidBombs, float 
         popBoidBomb(boidBomb, world);
         snake->clawStretch += 10;
         snake->comboHealth += 0.5;
+        comboFlashPercentage = 1.0;
         shakeCamera(10.0);
     }
 
@@ -1177,6 +1240,7 @@ void snakeEat(Snake* snake, World* world, Array* boids, Array* boidBombs, float 
     if (floor(oldComboLevel) < floor(snake->comboLevel)) {
         playSoundInstance(LEVEL_UP_SOUND, 1.0, 1.0);
         snake->comboHealth = 1.0;
+        comboFlashPercentage = 1.0;
     }
 
     snake->comboHealth -= delta * 0.2 * (floor(snake->comboLevel) > 0);
@@ -1215,7 +1279,8 @@ void initWorld(World* world, Rectangle bounds, float waterLine)
 {
     world->boids = aCreate(128, sizeof(Boid));
     world->boidBombs = aCreate(8, sizeof(BoidBomb));
-    world->splashParticles = aCreate(32, sizeof(SplashParticle));
+    world->splashParticles = aCreate(64, sizeof(SplashParticle));
+    world->bloodParticles = aCreate(64, sizeof(BloodParticle));
     initBoidMap(&world->boidMap, Vector2Ceil(Vector2Divide(RectangleSize(bounds), CHUNK_SIZE))); 
     initSnake(&world->snake, RectangleCenter(bounds), Vector2Zero());
 
@@ -1240,7 +1305,7 @@ void cleanWorld(World* world)
 
  
 
-#define WATER_LINE 200.0
+#define WATER_LINE 225.0
 
 //------------------------------------------------------------------------------------
 // Program main entry point
@@ -1263,9 +1328,11 @@ int main(void) {
     }
     float fixedTime = 0.0;
 
-    COLOR_BG = GetColor(0x171738FF);
-    COLOR_MAIN = GetColor(0xC1DBE3FF);
+    Color COLOR_DARK = GetColor(0x171738FF);
+    Color COLOR_LIGHT = GetColor(0xC1DBE3FF);
 
+    
+    COLOR_HIGHLIGHT = GetColor(0xBC4B51FF);
 
     InitWindow(screenSize.x, screenSize.y, "raylib [core] example - basic window");
     InitAudioDevice();
@@ -1276,6 +1343,7 @@ int main(void) {
     loadShaders();
 
     SetWindowTitle("NOM");
+    SetWindowIcon(FISH_WINDOW_ICON);
 
     camera.target = Vector2Zero();
     camera.offset = Vector2Zero();
@@ -1287,6 +1355,7 @@ int main(void) {
 
     Vector2 comboTextureSize = (Vector2){screenSize.x, 300};
     RenderTexture2D comboTexture = LoadRenderTexture(comboTextureSize.x, comboTextureSize.y);
+    
 
     SetTargetFPS(60);               // Set our game to run at 60 frames-per-second
     //--------------------------------------------------------------------------------------
@@ -1297,16 +1366,20 @@ int main(void) {
         //----------------------------------------------------------------------------------
         // TODO: Update your variables here
         //----------------------------------------------------------------------------------
-        Camera2D* cam = &camera;
 
         // if (IsKeyPressed(KEY_ENTER)) {
         //     shakeStrength = 100.0f;
         // }
 
+        COLOR_BG = (currentWorld.snake.comboLevel >= 10) ? COLOR_LIGHT : COLOR_DARK;
+        COLOR_MAIN = (currentWorld.snake.comboLevel >= 10) ? COLOR_DARK : COLOR_LIGHT;
+
         shakeStrength = Lerp(shakeStrength, 0.0, FIXED_DELTA * 5);
         shakeOffset = (Vector2){ RandRange(-shakeStrength, shakeStrength), RandRange(-shakeStrength, shakeStrength)};
         
         camera.target = (Vector2){RandRange(-shakeStrength, shakeStrength), RandRange(-shakeStrength, shakeStrength)};
+
+        comboFlashPercentage = Lerp(comboFlashPercentage, 0.0, FIXED_DELTA * 5);
         //printf("%f\n", camera.target.x);
 
         if (IsMouseButtonPressed(MOUSE_BUTTON_LEFT)) {
@@ -1316,7 +1389,7 @@ int main(void) {
         if (gameHasStarted) {
             currentWorld.boidBombSpawnTime -= FIXED_DELTA;
             if (currentWorld.boidBombSpawnTime <= 0.0) {
-                currentWorld.boidBombSpawnTime = Lerp(5.0, 10.0, RandFloat());
+                currentWorld.boidBombSpawnTime = RandRange(5.0, 8.0);
 
                 if (currentWorld.boids.used < 2000) {
                     bool spawnOnLeft = RandBool();
@@ -1334,6 +1407,7 @@ int main(void) {
         clearDeadEntities(&currentWorld.boids);
         clearDeadEntities(&currentWorld.boidBombs);
         clearDeadEntities(&currentWorld.splashParticles);
+        clearDeadEntities(&currentWorld.bloodParticles);
 
         clearBoidMap(&currentWorld.boidMap);
         populateBoidMap(&currentWorld.boidMap, &currentWorld.boids);
@@ -1347,12 +1421,13 @@ int main(void) {
 
         snakeUpdate(&currentWorld.snake, &currentWorld.water, FIXED_DELTA);
         snakeMove(&currentWorld.snake, currentWorld.bounds, &currentWorld.splashParticles, &currentWorld.water, fixedTime, FIXED_DELTA);
-        snakeEat(&currentWorld.snake, &currentWorld, &currentWorld.boids, &currentWorld.boidBombs, fixedTime, FIXED_DELTA);
+        snakeEat(&currentWorld.snake, &currentWorld, &currentWorld.boids, &currentWorld.boidBombs, &currentWorld.bloodParticles, fixedTime, FIXED_DELTA);
 
         waterBodyUpdate(&currentWorld.water, FIXED_DELTA);
         waterBodyMove(&currentWorld.water, &waves, fixedTime, FIXED_DELTA);
 
         splashParticlesMove(&currentWorld.splashParticles, &currentWorld.water, FIXED_DELTA);
+        bloodParticlesMove(&currentWorld.bloodParticles, &currentWorld.water, FIXED_DELTA);
         
         // Draw
         //----------------------------------------------------------------------------------
@@ -1369,14 +1444,16 @@ int main(void) {
                     int comboBonus = (int) getComboBonus(currentWorld.snake.comboLevel);
                     sprintf(str, "x%d", (int) getComboBonus(currentWorld.snake.comboLevel));
                     Vector2 drawPosition = RectangleCenter(currentWorld.water.bounds);
-                    drawPosition.y += 50;
+                    drawPosition.y += 60;
 
                     float cutoff = currentWorld.snake.comboLevel - floor(currentWorld.snake.comboLevel);
                     float colorBonus = currentWorld.snake.comboHealth;
                     EndMode2D();
                     BeginTextureMode(comboTexture); {
+                        Vector2 scale = getSquashScale((1.0 - comboFlashPercentage) * 0.5, 1.05);
+
                         ClearBackground((Color){0});
-                        Vector2 textSize = DrawTextAnchored( Vector2Scale(comboTextureSize, 0.5), (Vector2){0.5, 0.5}, MAIN_FONT, str, 200, 0.0, WHITE);
+                        Vector2 textSize = DrawTextAnchored( Vector2Scale(comboTextureSize, 0.5), (Vector2){0.5, 0.5}, MAIN_FONT, str, 200 * scale.x, 0.0, WHITE);
                         float half = (1.0 - (textSize.y / comboTextureSize.y)) / 2.0;
                         cutoff = Remap(cutoff, 0.0, 1.0, half + 0.1, 1.0 - half - 0.15);
                     } EndTextureMode();
@@ -1385,17 +1462,24 @@ int main(void) {
                     BeginShaderMode(MASK_SHADER); {
                         //DrawTexture(comboTexture.texture, 50, 50, WHITE);
                         
+                        
+
                         SetShaderValue(MASK_SHADER, GetShaderLocation(MASK_SHADER, "cutoff"), &cutoff, SHADER_UNIFORM_FLOAT);
                         
 
-                        GLSLColor color2 = glslColor(ColorLerp(COLOR_BG, COLOR_MAIN, 0.1 + colorBonus * 0.1));
-                        GLSLColor color1 = glslColor(ColorLerp(COLOR_BG, COLOR_MAIN, 0.2 + colorBonus * 0.1));
-                        color1.a = Lerp(0.2, 1.0, currentWorld.snake.comboHealth);
+                        GLSLColor color2 = glslColor(ColorLerp(ColorLerp(COLOR_BG, COLOR_MAIN, 0.1 + colorBonus * 0.1), COLOR_MAIN, comboFlashPercentage));
+                        GLSLColor color1 = glslColor(ColorLerp(ColorLerp(COLOR_BG, COLOR_MAIN, 0.2 + colorBonus * 0.1), COLOR_MAIN, comboFlashPercentage));
+
+    
+
+                        color1.a = Lerp(0.1, 1.0, currentWorld.snake.comboHealth);
                         color2.a = color1.a;
                         SetShaderValue(MASK_SHADER, GetShaderLocation(MASK_SHADER, "col1"), &color1, SHADER_UNIFORM_VEC4);
                         SetShaderValue(MASK_SHADER, GetShaderLocation(MASK_SHADER, "col2"), &color2, SHADER_UNIFORM_VEC4);
 
-                        DrawTextureRec(comboTexture.texture, (Rectangle){ 0, 0, comboTexture.texture.width, -comboTexture.texture.height}, Vector2Subtract(drawPosition, Vector2Multiply(comboTextureSize, (Vector2){0.5, 1.0})), WHITE);
+                        
+
+                        DrawTextureRec(comboTexture.texture, (Rectangle){ 0, 0, comboTexture.texture.width, -comboTexture.texture.height}, Vector2Add(Vector2Subtract(drawPosition, Vector2Multiply(comboTextureSize, (Vector2){0.5, 1.0})), ((Vector2){0, 40})), WHITE);
                         // DrawTexturePro(comboTexture.texture, (Rectangle){ 0, 0, comboTexture.texture.width, -comboTexture.texture.height}, 
                         // (Rectangle){ drawPosition.x - comboTexture.texture.width / 2, drawPosition.y - comboTexture.texture.height / 2, comboTexture.texture.width, -comboTexture.texture.height}, 
                         // Vector2Zero(), 0, WHITE);
@@ -1410,11 +1494,13 @@ int main(void) {
                 }
                 
 
+                bloodParticlesRender(&currentWorld.bloodParticles);
                 boidsRender(&currentWorld.boids);
                 waterBodyRender(&currentWorld.water);
                 boidBombsRender(&currentWorld.boidBombs, fixedTime);
                 snakeRender(&currentWorld.snake, fixedTime);
                 splashParticlesRender(&currentWorld.splashParticles);
+                
             EndMode2D();
         } EndDrawing();
         //----------------------------------------------------------------------------------
