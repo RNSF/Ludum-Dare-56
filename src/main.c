@@ -50,14 +50,22 @@ typedef struct BoidChunk {
     int boidCount;
 } BoidChunk;
 
+typedef struct SnakeNode {
+    Vector2 position;
+    float radius;
+} SnakeNode;
+
 typedef struct Snake {
     Entity entity;
+    Array nodes;
     float boostPercent;
     float boostColdownTimer;
     float score;
     float comboLevel;
     float comboHealth;
+    float rotation;
 } Snake;
+
 
 typedef struct WaterNode {
     Vector2 restingPosition;
@@ -180,6 +188,12 @@ bool RandBool() {
     return rand() & 1;
 }
 
+float fsign(float num) {
+    if (num > 0) return 1;
+    if (num < 0) return -1;
+    return 0;
+}
+
 
 
 ////////////////////////////////////////////
@@ -195,13 +209,18 @@ void DrawSpriteAnchored(Texture2D texture, Vector2 position, float rotation, Vec
 }
 
 void DrawSpriteAnchoredScaled(Texture2D texture, Vector2 position, float rotation, Vector2 scale, Vector2 anchor, Color tint) {
-    DrawTexturePro(texture, (Rectangle) {0, 0, texture.width, texture.height},
+
+    if (scale.x < 0) anchor.x = 1.0 - anchor.x;
+    if (scale.y < 0) anchor.y = 1.0 - anchor.y;
+
+    Vector2 origin = Vector2Multiply(anchor, (Vector2) { texture.width*fabs(scale.x), texture.height * fabs(scale.y) });
+    DrawTexturePro(texture, (Rectangle) {0, 0, texture.width * fsign(scale.x), texture.height * fsign(scale.y)},
         (Rectangle) {
         position.x, 
         position.y, 
-        texture.width * scale.x, texture.height  * scale.y
+        texture.width * fabs(scale.x), texture.height  * fabs(scale.y)
     },
-        Vector2Multiply(anchor, (Vector2) { texture.width* scale.x, texture.height * scale.y }), rotation, tint
+        origin, rotation, tint
     );
 }
 
@@ -690,14 +709,41 @@ void popBoidBomb(BoidBomb* boidBomb, World* world) {
 ////////////////////////////////////////////
 
 #define SNAKE_MAX_SPEED 400
-#define SNAKE_ACCELERATION 800
+#define SNAKE_ACCELERATION 1200
 #define SNAKE_HITBOX_RADIUS 20
 #define SNAKE_BOOST_MAX_SPEED 600
 #define SNAKE_HEAD_RADIUS 20
+#define SNAKE_TAIL_RADIUS 8
 #define SNAKE_BOOST_ACCELERATION SNAKE_BOOST_MAX_SPEED * FPS
 #define SNAKE_FRICTION_C 0.02
 #define SNAKE_BOUNCE_DAMPENING 0.6
 #define SNAKE_BOOST_COOLDOWN_TIME 1.0
+#define SNAKE_NODE_COUNT 5
+
+void initSnake(Snake* snake, Vector2 position, Vector2 velocity) {
+    snake->entity.position = position;
+    snake->entity.velocity = velocity;
+    snake->boostPercent = 0.0;
+    snake->boostColdownTimer = 0.0;
+    snake->score = 0.0;
+    snake->comboLevel = 0.0;
+    snake->comboHealth = 1.0;
+    snake->nodes = aCreate(SNAKE_NODE_COUNT, sizeof(SnakeNode));
+    snake->nodes.used = snake->nodes.size;
+    snake->rotation = 0.0;
+
+    for ITERATE(i, snake->nodes.used) {
+        SnakeNode* snakeNode = aGet(&snake->nodes, i);
+        snakeNode->radius = Lerp(SNAKE_HEAD_RADIUS, SNAKE_TAIL_RADIUS, ((float) i) / (snake->nodes.used - 1));
+        
+        if (i) {
+            SnakeNode* previousSnakeNode = aGet(&snake->nodes, i - 1);
+            snakeNode->position = Vector2Subtract( previousSnakeNode->position, (Vector2){previousSnakeNode->radius + snakeNode->radius, 0});
+        } else {
+            snakeNode->position = snake->entity.position;
+        }
+    }
+}
 
 void snakeUpdate(Snake* snake, WaterBody* water, float delta) {
     assert(delta >= 0);
@@ -705,39 +751,48 @@ void snakeUpdate(Snake* snake, WaterBody* water, float delta) {
     snake->boostColdownTimer -= delta;
 
     if (!inWater(water, snake->entity.position)) {
+        // OUT OF WATER
         snake->entity.velocity.y += GRAVITY * delta;
-        return;
-    }
-
-    Vector2 targetDirection = Vector2Normalize((Vector2) {
-        IsKeyDown(KEY_D) - IsKeyDown(KEY_A),
-        IsKeyDown(KEY_S) - IsKeyDown(KEY_W),
-    });
-
-    bool canBoost = snake->boostColdownTimer <= 0.0;
-    if (canBoost && IsKeyPressed(KEY_LEFT_SHIFT)) {
-        // boost
-        snake->entity.velocity = Vector2Scale(targetDirection, SNAKE_BOOST_MAX_SPEED);
-        snake->boostColdownTimer = SNAKE_BOOST_COOLDOWN_TIME;
     } else {
-        snake->boostPercent = 0.0;
+        // IN WATER
+        Vector2 targetDirection = Vector2Normalize((Vector2) {
+            IsKeyDown(KEY_D) - IsKeyDown(KEY_A),
+            IsKeyDown(KEY_S) - IsKeyDown(KEY_W),
+        });
+
+        bool canBoost = snake->boostColdownTimer <= 0.0;
+        if (canBoost && IsKeyPressed(KEY_LEFT_SHIFT)) {
+            // boost
+            snake->entity.velocity = Vector2Scale(targetDirection, SNAKE_BOOST_MAX_SPEED);
+            snake->boostColdownTimer = SNAKE_BOOST_COOLDOWN_TIME;
+        } else {
+            snake->boostPercent = 0.0;
+        }
+        
+
+        float maxSpeed =        Lerp(SNAKE_MAX_SPEED    , SNAKE_BOOST_MAX_SPEED     , snake->boostPercent);
+        float acceleration =    Lerp(SNAKE_ACCELERATION , SNAKE_BOOST_ACCELERATION  , snake->boostPercent);
+
+        Vector2 targetVelocity = Vector2Scale(targetDirection, fmax(maxSpeed, Vector2Length(snake->entity.velocity)));
+        Vector2 velocityDifference = Vector2Subtract(targetVelocity, snake->entity.velocity);
+        Vector2 accelerationDirection = Vector2Normalize(velocityDifference);
+        snake->entity.velocity = Vector2Add(snake->entity.velocity, Vector2ClampValue(Vector2Scale(accelerationDirection, acceleration * delta), 0, Vector2Length(velocityDifference)));
+        snake->entity.velocity = Vector2Add(snake->entity.velocity, Vector2Scale(snake->entity.velocity, -SNAKE_FRICTION_C * delta));
+        snake->entity.velocity = Vector2ClampValue(snake->entity.velocity, 0, fmax(maxSpeed, Vector2Length(snake->entity.velocity)));
     }
-    
 
-    float maxSpeed =        Lerp(SNAKE_MAX_SPEED    , SNAKE_BOOST_MAX_SPEED     , snake->boostPercent);
-    float acceleration =    Lerp(SNAKE_ACCELERATION , SNAKE_BOOST_ACCELERATION  , snake->boostPercent);
-
-    Vector2 targetVelocity = Vector2Scale(targetDirection, fmax(maxSpeed, Vector2Length(snake->entity.velocity)));
-    Vector2 velocityDifference = Vector2Subtract(targetVelocity, snake->entity.velocity);
-    Vector2 accelerationDirection = Vector2Normalize(velocityDifference);
-    snake->entity.velocity = Vector2Add(snake->entity.velocity, Vector2ClampValue(Vector2Scale(accelerationDirection, acceleration * delta), 0, Vector2Length(velocityDifference)));
-    snake->entity.velocity = Vector2Add(snake->entity.velocity, Vector2Scale(snake->entity.velocity, -SNAKE_FRICTION_C * delta));
-    snake->entity.velocity = Vector2ClampValue(snake->entity.velocity, 0, fmax(maxSpeed, Vector2Length(snake->entity.velocity)));
+    if (Vector2Length(snake->entity.velocity) > 0) {
+        snake->rotation = atan2(snake->entity.velocity.y, snake->entity.velocity.x);
+    }
 }
 
 void snakeMove(Snake* snake, Rectangle bounds, WaterBody* water, float delta) {
     Vector2 oldPosition = snake->entity.position;
+
+    // Move
     snake->entity.position = Vector2Add(snake->entity.position, Vector2Scale(snake->entity.velocity, delta));
+    
+    // Bounce of bounds
     Rectangle clampBounds = RectangleReduceAll(bounds, SNAKE_HEAD_RADIUS);
 
     if (snake->entity.position.x < RectangleLeft(clampBounds))     snake->entity.velocity.x = abs(snake->entity.velocity.x)  * SNAKE_BOUNCE_DAMPENING;
@@ -745,18 +800,37 @@ void snakeMove(Snake* snake, Rectangle bounds, WaterBody* water, float delta) {
     if (snake->entity.position.y < RectangleTop(clampBounds))      snake->entity.velocity.y = abs(snake->entity.velocity.y)  * SNAKE_BOUNCE_DAMPENING;
     if (snake->entity.position.y >= RectangleBottom(clampBounds))  snake->entity.velocity.y = -abs(snake->entity.velocity.y) * SNAKE_BOUNCE_DAMPENING;
 
+    // Update in water
     bool wasInWater = inWater(water, oldPosition);
     bool nowInWater = inWater(water, snake->entity.position);
 
     if (wasInWater != nowInWater) {
         WaterNode* waterNode = getNearestWaterNode(water, snake->entity.position);
-        waterNode->velocityY = snake->entity.velocity.y * 1.2;
+        waterNode->velocityY = snake->entity.velocity.y * 1.6;
         printf("SPLASH\n");
+    }
+
+    // Update nodes
+    SnakeNode* snakeNode = aGet(&snake->nodes, 0);
+    snakeNode->position = snake->entity.position;
+    for ITERATE(i, snake->nodes.used - 1) {
+        SnakeNode* snakeNode = aGet(&snake->nodes, i);
+        SnakeNode* nextSnakeNode = aGet(&snake->nodes, i + 1);
+        nextSnakeNode->position = Vector2Add(snakeNode->position, Vector2Scale(Vector2Normalize(Vector2Subtract(nextSnakeNode->position, snakeNode->position)), nextSnakeNode->radius + snakeNode->radius));
     }
 }
 
 void snakeRender(Snake* snake) {
+
+    for ITERATE(i, snake->nodes.used) {
+        SnakeNode* snakeNode = aGet(&snake->nodes, i);
+        DrawCircle(snakeNode->position.x, snakeNode->position.y, snakeNode->radius, WHITE);
+        DrawCircle(snakeNode->position.x, snakeNode->position.y, snakeNode->radius - 4, BLACK);
+    }
+
     DrawCircle(snake->entity.position.x, snake->entity.position.y, SNAKE_HEAD_RADIUS, WHITE);
+    DrawSpriteAnchoredScaled(MANDIBLE_SPRITE, snake->entity.position, RAD2DEG * snake->rotation, (Vector2){1, 1}, (Vector2){0, 1.2}, WHITE);
+    DrawSpriteAnchoredScaled(MANDIBLE_SPRITE, snake->entity.position, RAD2DEG * snake->rotation, (Vector2){1, -1}, (Vector2){0, 1.2}, WHITE);
 }
 
 void snakeEat(Snake* snake, World* world, Array* boids, Array* boidBombs, float delta) {
@@ -810,16 +884,10 @@ void initWorld(World* world, Rectangle bounds, float waterLine)
 {
     world->boids = aCreate(128, sizeof(Boid));
     world->boidBombs = aCreate(8, sizeof(BoidBomb));
-    initBoidMap(&world->boidMap, Vector2Ceil(Vector2Divide(RectangleSize(bounds), CHUNK_SIZE)));
-    world->snake.entity.position = RectangleCenter(bounds);
-    world->snake.entity.velocity = Vector2Zero();
-    world->snake.boostPercent = 0.0;
-    world->snake.boostColdownTimer = 0.0;
-    world->snake.score = 0.0;
-    world->snake.comboLevel = 0.0;
-    world->snake.comboHealth = 1.0;
+    initBoidMap(&world->boidMap, Vector2Ceil(Vector2Divide(RectangleSize(bounds), CHUNK_SIZE))); 
+    initSnake(&world->snake, RectangleCenter(bounds), Vector2Zero());
 
-
+    world->boidBombSpawnTime = 0;
     world->bounds = bounds;
     Rectangle waterBounds = bounds;
     waterBounds.y += waterLine;
