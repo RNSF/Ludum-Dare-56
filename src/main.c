@@ -112,6 +112,11 @@ typedef struct WaterWave {
     float offset;
 } WaterWave;
 
+typedef struct SplashParticle {
+    Entity entity;
+    float radius;
+} SplashParticle;
+
 typedef struct BoidBomb {
     Entity entity;
     unsigned int boidCount;
@@ -121,6 +126,7 @@ typedef struct BoidBomb {
 typedef struct World {
     Array boids;
     Array boidBombs;
+    Array splashParticles;
     BoidMap boidMap;
     Snake snake;
     Rectangle bounds;
@@ -551,6 +557,47 @@ WaterNode* getNearestWaterNode(WaterBody* water, Vector2 position) {
 bool inWater(WaterBody* water, Vector2 position) {
     return CheckCollisionPointRec(position, water->bounds);
 }
+
+
+////////////////////////////////////////////
+// ..SplashParticle
+////////////////////////////////////////////
+
+void spawnSpawnParticles(Array* splashParticles, Vector2 position, float speed, unsigned int count) {
+    for ITERATE(i, count) {
+        SplashParticle splashParticle = {0};
+        splashParticle.entity.position = position;
+        splashParticle.radius = RandRange(1, 6);
+        splashParticle.entity.velocity = Vector2Scale(Vector2Rotate((Vector2){0, -1}, RandRange(-PI / 4, PI / 4)), speed * RandRange(0.8, 1.0) / sqrt(splashParticle.radius));
+        splashParticle.entity.flags = FLAG_SPAWNING;
+        aAppend(splashParticles, &splashParticle);
+    }
+}
+
+void splashParticlesMove(Array* splashParticles, WaterBody* water, float delta) {
+    
+    for ITERATE(i, splashParticles->used) {
+        SplashParticle* splashParticle = aGet(splashParticles, i);
+        splashParticle->entity.velocity.y += GRAVITY * delta;
+        splashParticle->entity.position = Vector2Add(splashParticle->entity.position, Vector2Scale(splashParticle->entity.velocity, delta));
+        // printf("%f\n", splashParticle->entity.velocity.y);
+
+        bool particleInWater = inWater(water, splashParticle->entity.position);
+        if (!particleInWater) splashParticle->entity.flags &= ~FLAG_SPAWNING;
+        if (particleInWater && !(splashParticle->entity.flags & FLAG_SPAWNING)) {
+            splashParticle->entity.flags |= FLAG_DEAD;
+        }
+    }
+}
+
+void splashParticlesRender(Array* splashParticles) {
+    
+    for ITERATE(i, splashParticles->used) {
+        SplashParticle* splashParticle = aGet(splashParticles, i);
+        DrawCircle(splashParticle->entity.position.x, splashParticle->entity.position.y, splashParticle->radius, COLOR_MAIN);
+    }
+}
+
 
 
 ////////////////////////////////////////////
@@ -1005,7 +1052,7 @@ void snakeUpdate(Snake* snake, WaterBody* water, float delta) {
     else            snake->entity.flags &= ~FLAG_CAN_DASH;
 }
 
-void snakeMove(Snake* snake, Rectangle bounds, WaterBody* water, float time, float delta) {
+void snakeMove(Snake* snake, Rectangle bounds, Array* splashParticles, WaterBody* water, float time, float delta) {
     Vector2 oldPosition = snake->entity.position;
 
     // Move
@@ -1044,6 +1091,9 @@ void snakeMove(Snake* snake, Rectangle bounds, WaterBody* water, float time, flo
         WaterNode* waterNode = getNearestWaterNode(water, snake->entity.position);
         waterNode->velocityY = snake->entity.velocity.y * 1.6;
 
+        Vector2 spawnPosition = wasInWater ? snake->entity.position : oldPosition;
+
+        spawnSpawnParticles(splashParticles, Vector2Add(spawnPosition, (Vector2) {-1, 0} ), sqrt(abs(snake->entity.velocity.y)) * 20, Clamp(Remap(abs(snake->entity.velocity.y), 0, SNAKE_MAX_SPEED, 10, 60), 10, 60));
         float loudness = Remap(abs(snake->entity.velocity.y), 0, SNAKE_MAX_SPEED, 0.3, 0.8);
         if (wasInWater) {
             playSoundInstance(SPLASH_OUT_SOUND, loudness, RandRange(0.9, 1.1));
@@ -1155,6 +1205,8 @@ void snakeEat(Snake* snake, World* world, Array* boids, Array* boidBombs, float 
 
 
 
+
+
 ////////////////////////////////////////////
 // ..World
 ////////////////////////////////////////////
@@ -1163,6 +1215,7 @@ void initWorld(World* world, Rectangle bounds, float waterLine)
 {
     world->boids = aCreate(128, sizeof(Boid));
     world->boidBombs = aCreate(8, sizeof(BoidBomb));
+    world->splashParticles = aCreate(32, sizeof(SplashParticle));
     initBoidMap(&world->boidMap, Vector2Ceil(Vector2Divide(RectangleSize(bounds), CHUNK_SIZE))); 
     initSnake(&world->snake, RectangleCenter(bounds), Vector2Zero());
 
@@ -1222,6 +1275,8 @@ int main(void) {
     loadFonts();
     loadShaders();
 
+    SetWindowTitle("NOM");
+
     camera.target = Vector2Zero();
     camera.offset = Vector2Zero();
     camera.rotation = 0.0f;
@@ -1278,22 +1333,26 @@ int main(void) {
 
         clearDeadEntities(&currentWorld.boids);
         clearDeadEntities(&currentWorld.boidBombs);
+        clearDeadEntities(&currentWorld.splashParticles);
 
         clearBoidMap(&currentWorld.boidMap);
         populateBoidMap(&currentWorld.boidMap, &currentWorld.boids);
         boidsReact(&currentWorld.boids, &currentWorld.boidMap, &currentWorld.water, currentWorld.water.bounds, currentWorld.snake.entity.position, FIXED_DELTA);
         boidsMove(&currentWorld.boids, &currentWorld.water, currentWorld.bounds, currentWorld.water.bounds, FIXED_DELTA);
+       
 
 
         boidBombsMove(&currentWorld.boidBombs, currentWorld.bounds, FIXED_DELTA);
         
 
         snakeUpdate(&currentWorld.snake, &currentWorld.water, FIXED_DELTA);
-        snakeMove(&currentWorld.snake, currentWorld.bounds, &currentWorld.water, fixedTime, FIXED_DELTA);
+        snakeMove(&currentWorld.snake, currentWorld.bounds, &currentWorld.splashParticles, &currentWorld.water, fixedTime, FIXED_DELTA);
         snakeEat(&currentWorld.snake, &currentWorld, &currentWorld.boids, &currentWorld.boidBombs, fixedTime, FIXED_DELTA);
 
         waterBodyUpdate(&currentWorld.water, FIXED_DELTA);
         waterBodyMove(&currentWorld.water, &waves, fixedTime, FIXED_DELTA);
+
+        splashParticlesMove(&currentWorld.splashParticles, &currentWorld.water, FIXED_DELTA);
         
         // Draw
         //----------------------------------------------------------------------------------
@@ -1355,6 +1414,7 @@ int main(void) {
                 waterBodyRender(&currentWorld.water);
                 boidBombsRender(&currentWorld.boidBombs, fixedTime);
                 snakeRender(&currentWorld.snake, fixedTime);
+                splashParticlesRender(&currentWorld.splashParticles);
             EndMode2D();
         } EndDrawing();
         //----------------------------------------------------------------------------------
