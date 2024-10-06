@@ -7,6 +7,26 @@
 #include "hash_table.h"
 #include "raymath.h"
 
+//#define _CRT_SECURE_NO_WARNINGS
+
+
+
+#ifndef _DEBUG
+
+#define _MT
+#pragma comment(linker, "/SUBSYSTEM:windows /ENTRY:mainCRTStartup")
+
+#endif
+
+
+#if defined(PLATFORM_DESKTOP)
+    #define GLSL_VERSION            330
+#else   // PLATFORM_ANDROID, PLATFORM_WEB
+    #define GLSL_VERSION            100
+#endif
+
+
+
 #define ITERATE(IDX, LEN) (size_t IDX = 0; IDX < LEN; IDX++)
 #define DEBUG_ENABLED true
 #define CHUNK_SIZE (Vector2){16, 16}
@@ -106,7 +126,18 @@ typedef struct World {
 // ..Color
 ////////////////////////////////////////////
 
+#define COLOR_MAIN WHITE
+#define COLOR_BG BLACK
 
+// Blend Color
+Color ColorLerp(Color c1, Color c2, float amount) {
+    return (Color) {
+        Lerp(c1.r, c2.r, amount),
+        Lerp(c1.g, c2.g, amount),
+        Lerp(c1.b, c2.b, amount),
+        Lerp(c1.a, c2.a, amount),
+    };
+}
 
 ////////////////////////////////////////////
 // ..Math
@@ -224,15 +255,16 @@ void DrawSpriteAnchoredScaled(Texture2D texture, Vector2 position, float rotatio
     );
 }
 
-void DrawTextAnchored(Vector2 position, Vector2 anchor, Font font, const char* text, int fontSize, float spacing, Color color) {
+Vector2 DrawTextAnchored(Vector2 position, Vector2 anchor, Font font, const char* text, int fontSize, float spacing, Color color) {
     Vector2 textSize = MeasureTextEx(font, text, fontSize, spacing);
     Vector2 drawPosition = Vector2Subtract(position, Vector2Multiply(textSize, anchor));
     DrawTextEx(font, text, drawPosition, fontSize, spacing, color);
+    return textSize;
 }
 
 
 ////////////////////////////////////////////
-// ..Images
+// ..Sprites
 ////////////////////////////////////////////
 
 Texture2D PLANE_SPRITE;
@@ -245,6 +277,42 @@ void loadSprites() {
     MANDIBLE_SPRITE     = LoadTexture("assets/sprites/mandible.png");
     STRING_SPRITE       = LoadTexture("assets/sprites/string.png");
     FISH_ICON_SPRITE    = LoadTexture("assets/sprites/fish_icon.png");
+}
+
+////////////////////////////////////////////
+// ..Fonts
+////////////////////////////////////////////
+
+Font MAIN_FONT;
+
+void loadFonts() {
+    MAIN_FONT           = LoadFontEx("assets/fonts/Concert_One/ConcertOne-Regular.ttf", 400, NULL, 0);
+}
+
+////////////////////////////////////////////
+// ..Shaders
+////////////////////////////////////////////
+
+typedef struct GLSLColor {
+    float r;
+    float g;
+    float b;
+    float a;
+} GLSLColor;
+
+GLSLColor glslColor(Color color) {
+    return (GLSLColor) {
+        ((float) color.r) /255,
+        ((float) color.g) /255,
+        ((float) color.b) /255,
+        ((float) color.a) /255,
+    };
+}
+
+Shader MASK_SHADER;
+
+void loadShaders() {
+    MASK_SHADER           = LoadShader(0, TextFormat("assets/shaders/mask.fs", GLSL_VERSION));
 }
 
 
@@ -290,6 +358,9 @@ void initWaterBody(WaterBody* water, Rectangle bounds, float nodesPerDistance) {
     for ITERATE(i, water->nodes.used) {
         WaterNode* waterNode = aGet(&water->nodes, i);
         waterNode->restingPosition = Vector2Add(boundsTopLeft, (Vector2){bounds.width * ((float) i) / (water->nodes.used - 1), 0});
+        waterNode->velocityY = 0;
+        waterNode->forceOffsetY = 0;
+        waterNode->naturalOffsetY = 0;
     }
 }
 
@@ -364,7 +435,7 @@ void waterBodyRender(WaterBody* water) {
         aSet(&splinePositions, i, &position);
     }
 
-    DrawSplineLinear(splinePositions.array, splinePositions.used, 5, WHITE);
+    DrawSplineLinear(splinePositions.array, splinePositions.used, 5, COLOR_MAIN);
     aFree(&splinePositions);
 }
 
@@ -644,7 +715,7 @@ void boidsRender(Array* boids)
 {
     for ITERATE(i, boids->used) {
         Boid* boid = aGet(boids, i);
-        DrawCircle(boid->entity.position.x, boid->entity.position.y, BOID_RADIUS, WHITE);
+        DrawCircle(boid->entity.position.x, boid->entity.position.y, BOID_RADIUS, COLOR_MAIN);
     }
 }
 
@@ -688,11 +759,11 @@ void boidBombsRender(Array* boidBombs) {
         int facing = boidBomb->entity.velocity.x > 0 ? 1 : -1;
         const float planeOffsetY = -15;
 
-        DrawSpriteAnchoredScaled(PLANE_SPRITE, Vector2Add(boidBomb->entity.position, (Vector2){0, -radius + planeOffsetY}), 0, (Vector2){facing, 1}, (Vector2){0.5, 0.5}, WHITE);
+        DrawSpriteAnchoredScaled(PLANE_SPRITE, Vector2Add(boidBomb->entity.position, (Vector2){0, -radius + planeOffsetY}), 0, (Vector2){facing, 1}, (Vector2){0.5, 0.5}, COLOR_MAIN);
         if (!(boidBomb->entity.flags & FLAG_DROPPED)) {
-            DrawSpriteAnchoredScaled(STRING_SPRITE, Vector2Add(boidBomb->entity.position, (Vector2){0, -radius + planeOffsetY + -5}), 0, Vector2Scale(Vector2One(), radius * 2 / 50.0), (Vector2){0.5, 0.0}, WHITE);
-            DrawCircle(boidBomb->entity.position.x, boidBomb->entity.position.y, radius, WHITE);
-            DrawSpriteAnchoredScaled(FISH_ICON_SPRITE, boidBomb->entity.position, 0, Vector2Scale(Vector2One(), radius * 2 / 200.0 * 0.7), (Vector2){0.5, 0.5},  BLACK);
+            DrawSpriteAnchoredScaled(STRING_SPRITE, Vector2Add(boidBomb->entity.position, (Vector2){0, -radius + planeOffsetY + -5}), 0, Vector2Scale(Vector2One(), radius * 2 / 50.0), (Vector2){0.5, 0.0}, COLOR_MAIN);
+            DrawCircle(boidBomb->entity.position.x, boidBomb->entity.position.y, radius, COLOR_MAIN);
+            DrawSpriteAnchoredScaled(FISH_ICON_SPRITE, boidBomb->entity.position, 0, Vector2Scale(Vector2One(), radius * 2 / 200.0 * 0.7), (Vector2){0.5, 0.5},  COLOR_BG);
         }
     }
 }
@@ -719,6 +790,10 @@ void popBoidBomb(BoidBomb* boidBomb, World* world) {
 #define SNAKE_BOUNCE_DAMPENING 0.6
 #define SNAKE_BOOST_COOLDOWN_TIME 1.0
 #define SNAKE_NODE_COUNT 5
+
+float getComboBonus(float comboLevel) {
+    return 1 << (int) (floor(comboLevel));
+}
 
 void initSnake(Snake* snake, Vector2 position, Vector2 velocity) {
     snake->entity.position = position;
@@ -761,7 +836,7 @@ void snakeUpdate(Snake* snake, WaterBody* water, float delta) {
         });
 
         bool canBoost = snake->boostColdownTimer <= 0.0;
-        if (canBoost && IsKeyPressed(KEY_LEFT_SHIFT)) {
+        if (canBoost && (IsKeyPressed(KEY_LEFT_SHIFT) || IsKeyPressed(KEY_SPACE))) {
             // boost
             snake->entity.velocity = Vector2Scale(targetDirection, SNAKE_BOOST_MAX_SPEED);
             snake->boostColdownTimer = SNAKE_BOOST_COOLDOWN_TIME;
@@ -824,13 +899,13 @@ void snakeRender(Snake* snake) {
 
     for ITERATE(i, snake->nodes.used) {
         SnakeNode* snakeNode = aGet(&snake->nodes, i);
-        DrawCircle(snakeNode->position.x, snakeNode->position.y, snakeNode->radius, WHITE);
-        DrawCircle(snakeNode->position.x, snakeNode->position.y, snakeNode->radius - 4, BLACK);
+        DrawCircle(snakeNode->position.x, snakeNode->position.y, snakeNode->radius, COLOR_MAIN);
+        DrawCircle(snakeNode->position.x, snakeNode->position.y, snakeNode->radius - 4, COLOR_BG);
     }
 
-    DrawCircle(snake->entity.position.x, snake->entity.position.y, SNAKE_HEAD_RADIUS, WHITE);
-    DrawSpriteAnchoredScaled(MANDIBLE_SPRITE, snake->entity.position, RAD2DEG * snake->rotation, (Vector2){1, 1}, (Vector2){0, 1.2}, WHITE);
-    DrawSpriteAnchoredScaled(MANDIBLE_SPRITE, snake->entity.position, RAD2DEG * snake->rotation, (Vector2){1, -1}, (Vector2){0, 1.2}, WHITE);
+    DrawCircle(snake->entity.position.x, snake->entity.position.y, SNAKE_HEAD_RADIUS, COLOR_MAIN);
+    DrawSpriteAnchoredScaled(MANDIBLE_SPRITE, snake->entity.position, RAD2DEG * snake->rotation, (Vector2){1, 1}, (Vector2){0, 1.2}, COLOR_MAIN);
+    DrawSpriteAnchoredScaled(MANDIBLE_SPRITE, snake->entity.position, RAD2DEG * snake->rotation, (Vector2){1, -1}, (Vector2){0, 1.2}, COLOR_MAIN);
 }
 
 void snakeEat(Snake* snake, World* world, Array* boids, Array* boidBombs, float delta) {
@@ -851,10 +926,23 @@ void snakeEat(Snake* snake, World* world, Array* boids, Array* boidBombs, float 
         }
     }
 
-    snake->score += boidsEaten * pow(2, floor(snake->comboLevel));
-    snake->comboLevel += boidsEaten / (snake->comboLevel + 1) * 0.1;
-    snake->comboHealth += boidsEaten * 0.01 / (snake->comboLevel + 1);
-    snake->comboHealth -= delta * 0.2 * (snake->comboLevel > 0);
+    for ITERATE(i, boidBombs->used) {
+        BoidBomb* boidBomb = aGet(boidBombs, i);
+        if (boidBomb->entity.flags & FLAG_DROPPED) continue;
+        if (!CheckCollisionCircles(hitboxPosition, SNAKE_HITBOX_RADIUS, boidBomb->entity.position, getBoidBombRadius(boidBomb->boidCount))) continue;
+        popBoidBomb(boidBomb, world);
+        snake->comboHealth += 0.5;
+    }
+
+    float oldComboLevel = snake->comboLevel;
+    snake->score += boidsEaten * getComboBonus(snake->comboLevel);
+    snake->comboLevel += boidsEaten / (floor(snake->comboLevel) + 1) * 0.03;
+
+    if (floor(oldComboLevel) < floor(snake->comboLevel)) {
+        snake->comboHealth = 1.0;
+    }
+
+    snake->comboHealth -= delta * 0.2 * (floor(snake->comboLevel) > 0);
 
     snake->comboHealth = Clamp( snake->comboHealth, 0.0, 1.0);
     // Reset
@@ -863,12 +951,7 @@ void snakeEat(Snake* snake, World* world, Array* boids, Array* boidBombs, float 
         snake->comboHealth = 1.0;
     }
 
-    for ITERATE(i, boidBombs->used) {
-        BoidBomb* boidBomb = aGet(boidBombs, i);
-        if (boidBomb->entity.flags & FLAG_DROPPED) continue;
-        if (!CheckCollisionCircles(hitboxPosition, SNAKE_HITBOX_RADIUS, boidBomb->entity.position, getBoidBombRadius(boidBomb->boidCount))) continue;
-        popBoidBomb(boidBomb, world);
-    }
+    
 }
 
 
@@ -933,6 +1016,11 @@ int main(void) {
     InitWindow(screenSize.x, screenSize.y, "raylib [core] example - basic window");
 
     loadSprites();
+    loadFonts();
+    loadShaders();
+
+    Vector2 comboTextureSize = (Vector2){400, 300};
+    RenderTexture2D comboTexture = LoadRenderTexture(comboTextureSize.x, comboTextureSize.y);
 
     SetTargetFPS(60);               // Set our game to run at 60 frames-per-second
     //--------------------------------------------------------------------------------------
@@ -981,9 +1069,48 @@ int main(void) {
         
         // Draw
         //----------------------------------------------------------------------------------
-        BeginDrawing();
+        BeginDrawing(); {
 
-            ClearBackground(BLACK);
+            ClearBackground(COLOR_BG);
+
+            char str[8];
+
+            int comboBonus = getComboBonus(currentWorld.snake.comboLevel);
+            sprintf(str, "x%d", (int) getComboBonus(currentWorld.snake.comboLevel));
+            Vector2 drawPosition = RectangleCenter(currentWorld.water.bounds);
+            drawPosition.y += 50;
+
+            float cutoff = currentWorld.snake.comboLevel - floor(currentWorld.snake.comboLevel);
+            float colorBonus = currentWorld.snake.comboHealth;
+            BeginTextureMode(comboTexture); {
+                ClearBackground((Color){0});
+                Vector2 textSize = DrawTextAnchored( Vector2Scale(comboTextureSize, 0.5), (Vector2){0.5, 0.5}, MAIN_FONT, str, 200, 0.0, WHITE);
+                float half = (1.0 - (textSize.y / comboTextureSize.y)) / 2.0;
+                cutoff = Remap(cutoff, 0.0, 1.0, half + 0.1, 1.0 - half - 0.15);
+            } EndTextureMode();
+            
+            BeginShaderMode(MASK_SHADER); {
+                //DrawTexture(comboTexture.texture, 50, 50, WHITE);
+                
+                SetShaderValue(MASK_SHADER, GetShaderLocation(MASK_SHADER, "cutoff"), &cutoff, SHADER_UNIFORM_FLOAT);
+                
+
+                GLSLColor color2 = glslColor(ColorLerp(COLOR_BG, COLOR_MAIN, 0.1 + colorBonus * 0.1));
+                GLSLColor color1 = glslColor(ColorLerp(COLOR_BG, COLOR_MAIN, 0.2 + colorBonus * 0.1));
+                color1.a = Lerp(0.5, 1.0, currentWorld.snake.comboHealth);
+                color2.a = color1.a;
+                SetShaderValue(MASK_SHADER, GetShaderLocation(MASK_SHADER, "col1"), &color1, SHADER_UNIFORM_VEC4);
+                SetShaderValue(MASK_SHADER, GetShaderLocation(MASK_SHADER, "col2"), &color2, SHADER_UNIFORM_VEC4);
+
+                DrawTextureRec(comboTexture.texture, (Rectangle){ 0, 0, comboTexture.texture.width, -comboTexture.texture.height}, Vector2Subtract(drawPosition, Vector2Multiply(comboTextureSize, (Vector2){0.5, 1.0})), WHITE);
+                // DrawTexturePro(comboTexture.texture, (Rectangle){ 0, 0, comboTexture.texture.width, -comboTexture.texture.height}, 
+                // (Rectangle){ drawPosition.x - comboTexture.texture.width / 2, drawPosition.y - comboTexture.texture.height / 2, comboTexture.texture.width, -comboTexture.texture.height}, 
+                // Vector2Zero(), 0, WHITE);
+            } EndShaderMode();
+
+            sprintf(str, "%d", (int) floor(currentWorld.snake.score));
+            DrawTextAnchored(drawPosition, (Vector2){0.5, 0.0}, MAIN_FONT, str, 50, 0.0, ColorLerp(COLOR_BG, COLOR_MAIN, 0.1));
+            
 
             boidsRender(&currentWorld.boids);
             waterBodyRender(&currentWorld.water);
@@ -991,18 +1118,21 @@ int main(void) {
             snakeRender(&currentWorld.snake);
             
 
-            char str[8];
-            sprintf(str, "%d", (int) floor(currentWorld.snake.score));
-            DrawText(str, screenSize.x / 2, 20, 20, WHITE);
-            sprintf(str, "%d", (int) floor(currentWorld.snake.comboLevel));
-            DrawText(str, screenSize.x / 2, 40, 20, WHITE);
-            sprintf(str, "%d%",  (int) (currentWorld.snake.comboHealth * 100));
-            DrawText(str, screenSize.x / 2, 60, 20, WHITE);
+            
 
-            DrawTexture(PLANE_SPRITE, 20, 20, WHITE);
+            sprintf(str, "%d", (int) floor(currentWorld.snake.score));
+            DrawText(str, screenSize.x / 2, 20, 20, COLOR_MAIN);
+            sprintf(str, "%d", (int) floor(currentWorld.snake.comboLevel));
+            DrawText(str, screenSize.x / 2, 40, 20, COLOR_MAIN);
+            sprintf(str, "%d%",  (int) (currentWorld.snake.comboHealth * 100));
+            DrawText(str, screenSize.x / 2, 60, 20, COLOR_MAIN);
+
+            BeginShaderMode(MASK_SHADER); {
+                DrawTexture(PLANE_SPRITE, 20, 20, COLOR_MAIN);
+            }
             //DrawText("Congrats! You created your first window!", 190, 200, 20, LIGHTGRAY);
             DrawFPS(10, 10);
-        EndDrawing();
+        } EndDrawing();
         //----------------------------------------------------------------------------------
 
         fixedTime += FIXED_DELTA;

@@ -42,7 +42,8 @@
                 "-std=c17",
                 "-m64",
                 "-Ofast",
-                "-mwindows",
+                "-mwindows",                // remove console
+                //"-MT",                      // build without needing c++ redistributable
                 "${workspaceFolder}/src/*.c",
                 "${workspaceFolder}/src/my.o",
                 "-o",
@@ -55,7 +56,7 @@
                 "-lraylib",
                 "-lopengl32",
                 "-lgdi32",
-                "-lwinmm"
+                "-lwinmm",
             ],
             "options": {
                 "cwd": "${workspaceFolder}"

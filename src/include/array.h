@@ -11,6 +11,14 @@ typedef struct {
   size_t size;
 } Array;
 
+
+void* recalloc(void* source, size_t oldNumElement, size_t numElement, size_t sizeOfElements) {
+  void* newAddress = calloc(numElement, sizeOfElements);
+  memcpy(newAddress, source, oldNumElement * sizeOfElements);
+  free(source);
+  return newAddress;
+}
+
 Array aCreate(size_t initialCount, size_t elementSize);
 
 size_t aAppend(Array *a, void* element);
@@ -21,7 +29,7 @@ void aFree(Array *a);
 Array aCreate(size_t initialCount, size_t elementSize) 
 {
   Array a;
-  a.array = malloc(initialCount * elementSize);
+  a.array = calloc(initialCount, elementSize);
   a.elementSize = elementSize;
   a.used = 0;
   a.size = initialCount;
@@ -32,8 +40,9 @@ Array aCreate(size_t initialCount, size_t elementSize)
 size_t aAppend(Array *a, void* element) 
 {
   if (a->used == a->size) {
+    size_t oldSize = a->size;
     a->size *= 2;
-    a->array = realloc(a->array, a->size * a->elementSize);
+    a->array = recalloc(a->array, oldSize, a->size, a->elementSize);
   }
   memcpy(a->array + a->used * a->elementSize, element, a->elementSize);
   a->used++;
@@ -46,10 +55,11 @@ size_t aAppendArray(Array *a, Array *other)
   assert(a->elementSize == other->elementSize);
 
   if (a->used + other->used > a->size) {
+    size_t oldSize = a->size;
     while (a->used + other->used > a->size) {
       a->size *= 2;
     }
-    a->array = realloc(a->array, a->size * a->elementSize);
+    a->array = recalloc(a->array, oldSize, a->size, a->elementSize);
   }
 
   memcpy(a->array + a->used * a->elementSize, other->array, other->used * a->elementSize);
@@ -62,10 +72,11 @@ size_t aAppendArray(Array *a, Array *other)
 size_t aAppendStaticArray(Array *a, void* other, size_t otherCount) 
 {
   if (a->used + otherCount > a->size) {
+    size_t oldSize = a->size;
     while (a->used + otherCount > a->size) {
       a->size *= 2;
     }
-    a->array = realloc(a->array, a->size * a->elementSize);
+    a->array = recalloc(a->array, oldSize, a->size, a->elementSize);
   }
 
   
