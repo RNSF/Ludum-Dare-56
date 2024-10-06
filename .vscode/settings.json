@@ -70,6 +70,7 @@
     "ostream": "c",
     "streambuf": "c",
     "functional": "c",
-    "assert.h": "c"
+    "assert.h": "c",
+    "limits": "c"
   }
 }

@@ -34,6 +34,8 @@
 #define FIXED_DELTA 1.0/FPS
 #define BOID_CHUNK_MAX 32
 
+bool gameHasStarted = false;
+
 ////////////////////////////////////////////
 // ..Enum
 ////////////////////////////////////////////
@@ -215,6 +217,10 @@ float RandFloat() {
     return ((float) rand()) / RAND_MAX;
 }
 
+float RandRange(float range_min, float range_max) {
+    return Lerp(range_min, range_max, RandFloat());
+}
+
 bool RandBool() {
     return rand() & 1;
 }
@@ -261,6 +267,72 @@ Vector2 DrawTextAnchored(Vector2 position, Vector2 anchor, Font font, const char
     DrawTextEx(font, text, drawPosition, fontSize, spacing, color);
     return textSize;
 }
+
+
+////////////////////////////////////////////
+// ..Sound
+////////////////////////////////////////////
+
+
+
+#define SOUND_INSTANCE_COUNT 1000
+
+Sound soundInstances[SOUND_INSTANCE_COUNT];
+
+float placeSoundCooldown = 0.0;
+bool isSoundOn = true;
+
+bool playSoundInstance(Sound sound, float volume, float pitch) {
+    static int lastPlayedSoundInt = 0;
+    for (int i = (lastPlayedSoundInt + 1) % SOUND_INSTANCE_COUNT;
+        i != lastPlayedSoundInt; i = (i + 1) % SOUND_INSTANCE_COUNT)
+    {
+        assert(i >= 0);
+        assert(i < SOUND_INSTANCE_COUNT);
+        Sound currentSound = soundInstances[i];
+        if (!IsSoundPlaying(currentSound))
+        {
+            UnloadSoundAlias(currentSound);
+            soundInstances[i] = LoadSoundAlias(sound);
+            SetSoundVolume(soundInstances[i], volume);
+            SetSoundPitch(soundInstances[i], pitch);
+            PlaySound(soundInstances[i]);
+            lastPlayedSoundInt = i;
+            return true;
+        }
+        
+    }
+    return false;
+}
+
+
+Sound HIT_EDGE_SOUND;
+Sound LEVEL_RESET_SOUND;
+Sound LEVEL_UP_SOUND;
+Sound PLANE_SOUND;
+Sound SPLASH_IN_SOUND;
+Sound SPLASH_OUT_SOUND;
+Sound BOMB_EXPLODE_SOUND;
+Sound EAT_SOUND;
+Sound DASH_SOUND;
+
+
+void loadSounds() {
+    HIT_EDGE_SOUND = LoadSound("assets/sounds/hit_edge.wav");
+    LEVEL_RESET_SOUND = LoadSound("assets/sounds/level_reset.wav");
+    LEVEL_UP_SOUND = LoadSound("assets/sounds/level_up.wav");
+    PLANE_SOUND = LoadSound("assets/sounds/plane.wav");
+    SPLASH_IN_SOUND = LoadSound("assets/sounds/splash_in.wav");
+    SPLASH_OUT_SOUND = LoadSound("assets/sounds/splash_out.wav");
+    BOMB_EXPLODE_SOUND = LoadSound("assets/sounds/bomb_explode.wav");
+    EAT_SOUND = LoadSound("assets/sounds/eat.wav");
+    DASH_SOUND = LoadSound("assets/sounds/dash.wav");
+
+    for ITERATE(i, SOUND_INSTANCE_COUNT) {
+        soundInstances[i] = LoadSoundAlias(EAT_SOUND);
+    }
+}
+
 
 
 ////////////////////////////////////////////
@@ -770,6 +842,8 @@ void boidBombsRender(Array* boidBombs) {
 
 void popBoidBomb(BoidBomb* boidBomb, World* world) {
     assert(!(boidBomb->entity.flags & FLAG_DROPPED));
+    playSoundInstance(BOMB_EXPLODE_SOUND, 1.5, RandRange(0.9, 1.1));
+    playSoundInstance(HIT_EDGE_SOUND, 1.0, RandRange(0.9, 1.1));
     boidBomb->entity.flags |= FLAG_DROPPED;
     boidExplosiveSpawn(world, boidBomb->entity.position, boidBomb->boidCount);
 }
@@ -840,6 +914,8 @@ void snakeUpdate(Snake* snake, WaterBody* water, float delta) {
             // boost
             snake->entity.velocity = Vector2Scale(targetDirection, SNAKE_BOOST_MAX_SPEED);
             snake->boostColdownTimer = SNAKE_BOOST_COOLDOWN_TIME;
+            gameHasStarted = true;
+            playSoundInstance(DASH_SOUND, 0.4, RandRange(0.9, 1.1) * 0.6);
         } else {
             snake->boostPercent = 0.0;
         }
@@ -870,10 +946,27 @@ void snakeMove(Snake* snake, Rectangle bounds, WaterBody* water, float delta) {
     // Bounce of bounds
     Rectangle clampBounds = RectangleReduceAll(bounds, SNAKE_HEAD_RADIUS);
 
-    if (snake->entity.position.x < RectangleLeft(clampBounds))     snake->entity.velocity.x = abs(snake->entity.velocity.x)  * SNAKE_BOUNCE_DAMPENING;
-    if (snake->entity.position.x >= RectangleRight(clampBounds))   snake->entity.velocity.x = -abs(snake->entity.velocity.x) * SNAKE_BOUNCE_DAMPENING;
-    if (snake->entity.position.y < RectangleTop(clampBounds))      snake->entity.velocity.y = abs(snake->entity.velocity.y)  * SNAKE_BOUNCE_DAMPENING;
-    if (snake->entity.position.y >= RectangleBottom(clampBounds))  snake->entity.velocity.y = -abs(snake->entity.velocity.y) * SNAKE_BOUNCE_DAMPENING;
+    float edgeHitSpeed = 0.0;
+    if (snake->entity.position.x < RectangleLeft(clampBounds))    { 
+        edgeHitSpeed = fmax(edgeHitSpeed, abs(snake->entity.velocity.x)); 
+        snake->entity.velocity.x = abs(snake->entity.velocity.x)  * SNAKE_BOUNCE_DAMPENING; 
+    }
+    if (snake->entity.position.x >= RectangleRight(clampBounds))  { 
+        edgeHitSpeed = fmax(edgeHitSpeed, abs(snake->entity.velocity.x)); 
+        snake->entity.velocity.x = -abs(snake->entity.velocity.x) * SNAKE_BOUNCE_DAMPENING; 
+    }
+    if (snake->entity.position.y < RectangleTop(clampBounds))     { 
+        edgeHitSpeed = fmax(edgeHitSpeed, abs(snake->entity.velocity.y)); 
+        snake->entity.velocity.y = abs(snake->entity.velocity.y)  * SNAKE_BOUNCE_DAMPENING; 
+    }
+    if (snake->entity.position.y >= RectangleBottom(clampBounds)) { 
+        edgeHitSpeed = fmax(edgeHitSpeed, abs(snake->entity.velocity.y)); 
+        snake->entity.velocity.y = -abs(snake->entity.velocity.y) * SNAKE_BOUNCE_DAMPENING; 
+    }
+
+    if (edgeHitSpeed > 0) {
+        playSoundInstance(HIT_EDGE_SOUND, Remap(edgeHitSpeed, 0, SNAKE_MAX_SPEED, 0.3, 1.0), RandRange(0.5, 0.6));
+    }
 
     // Update in water
     bool wasInWater = inWater(water, oldPosition);
@@ -882,6 +975,14 @@ void snakeMove(Snake* snake, Rectangle bounds, WaterBody* water, float delta) {
     if (wasInWater != nowInWater) {
         WaterNode* waterNode = getNearestWaterNode(water, snake->entity.position);
         waterNode->velocityY = snake->entity.velocity.y * 1.6;
+
+        float loudness = Remap(abs(snake->entity.velocity.y), 0, SNAKE_MAX_SPEED, 0.3, 0.8);
+        if (wasInWater) {
+            playSoundInstance(SPLASH_OUT_SOUND, loudness, RandRange(0.9, 1.1));
+        } else {
+            playSoundInstance(SPLASH_IN_SOUND, loudness, RandRange(0.9, 1.1));
+        }
+
         printf("SPLASH\n");
     }
 
@@ -934,11 +1035,14 @@ void snakeEat(Snake* snake, World* world, Array* boids, Array* boidBombs, float 
         snake->comboHealth += 0.5;
     }
 
+    
+
     float oldComboLevel = snake->comboLevel;
     snake->score += boidsEaten * getComboBonus(snake->comboLevel);
     snake->comboLevel += boidsEaten / (floor(snake->comboLevel) + 1) * 0.03;
 
     if (floor(oldComboLevel) < floor(snake->comboLevel)) {
+        playSoundInstance(LEVEL_UP_SOUND, 1.0, 1.0);
         snake->comboHealth = 1.0;
     }
 
@@ -947,8 +1051,13 @@ void snakeEat(Snake* snake, World* world, Array* boids, Array* boidBombs, float 
     snake->comboHealth = Clamp( snake->comboHealth, 0.0, 1.0);
     // Reset
     if (snake->comboHealth <= 0) {
+        playSoundInstance(LEVEL_RESET_SOUND, 1.0, 1.0);
         snake->comboLevel = 0.0;
         snake->comboHealth = 1.0;
+    }
+
+    if (boidsEaten) {
+        playSoundInstance(EAT_SOUND, 0.5, Lerp(0.5, 1.0, snake->comboLevel - floor(snake->comboLevel)));
     }
 
     
@@ -989,6 +1098,8 @@ void cleanWorld(World* world)
 // ..Main
 ////////////////////////////////////////////
 
+ 
+
 #define WATER_LINE 200.0
 
 //------------------------------------------------------------------------------------
@@ -1000,7 +1111,6 @@ int main(void) {
     Vector2 screenSize = (Vector2){800, 800};
 
     
-
     World currentWorld;
     initWorld(&currentWorld, RectangleFromSize(screenSize), WATER_LINE);
 
@@ -1013,13 +1123,16 @@ int main(void) {
     }
     float fixedTime = 0.0;
 
+
     InitWindow(screenSize.x, screenSize.y, "raylib [core] example - basic window");
+    InitAudioDevice();
 
     loadSprites();
+    loadSounds();
     loadFonts();
     loadShaders();
 
-    Vector2 comboTextureSize = (Vector2){400, 300};
+    Vector2 comboTextureSize = (Vector2){screenSize.x, 300};
     RenderTexture2D comboTexture = LoadRenderTexture(comboTextureSize.x, comboTextureSize.y);
 
     SetTargetFPS(60);               // Set our game to run at 60 frames-per-second
@@ -1036,16 +1149,21 @@ int main(void) {
             boidExplosiveSpawn(&currentWorld, GetMousePosition(), 400);
         }
         
-        currentWorld.boidBombSpawnTime -= FIXED_DELTA;
-        if (currentWorld.boidBombSpawnTime <= 0.0) {
-            currentWorld.boidBombSpawnTime = Lerp(5.0, 10.0, RandFloat());
-            bool spawnOnLeft = RandBool();
-            spawnBoidBomb(
-                &currentWorld, 
-                (Vector2) {spawnOnLeft ? -40 : currentWorld.bounds.width + 40, Lerp(40, WATER_LINE - 40, RandFloat())}, 
-                (Vector2) {(spawnOnLeft ? 1 : -1) * Lerp(40, 60, RandFloat()), 0},
-                Lerp(200, 800, RandFloat())
-            );
+        if (gameHasStarted) {
+            currentWorld.boidBombSpawnTime -= FIXED_DELTA;
+            if (currentWorld.boidBombSpawnTime <= 0.0) {
+                currentWorld.boidBombSpawnTime = Lerp(5.0, 10.0, RandFloat());
+
+                if (currentWorld.boids.used < 2000) {
+                    bool spawnOnLeft = RandBool();
+                    spawnBoidBomb(
+                        &currentWorld, 
+                        (Vector2) {spawnOnLeft ? -40 : currentWorld.bounds.width + 40, Lerp(40, WATER_LINE - 40, RandFloat())}, 
+                        (Vector2) {(spawnOnLeft ? 1 : -1) * Lerp(40, 60, RandFloat()), 0},
+                        Lerp(200, 800, RandFloat())
+                    );
+                }
+            }
         }
 
         clearDeadEntities(&currentWorld.boids);
@@ -1073,43 +1191,49 @@ int main(void) {
 
             ClearBackground(COLOR_BG);
 
-            char str[8];
+            char str[80];
 
-            int comboBonus = getComboBonus(currentWorld.snake.comboLevel);
-            sprintf(str, "x%d", (int) getComboBonus(currentWorld.snake.comboLevel));
-            Vector2 drawPosition = RectangleCenter(currentWorld.water.bounds);
-            drawPosition.y += 50;
+            if (gameHasStarted) {
+                int comboBonus = getComboBonus(currentWorld.snake.comboLevel);
+                sprintf(str, "x%d", (int) getComboBonus(currentWorld.snake.comboLevel));
+                Vector2 drawPosition = RectangleCenter(currentWorld.water.bounds);
+                drawPosition.y += 50;
 
-            float cutoff = currentWorld.snake.comboLevel - floor(currentWorld.snake.comboLevel);
-            float colorBonus = currentWorld.snake.comboHealth;
-            BeginTextureMode(comboTexture); {
-                ClearBackground((Color){0});
-                Vector2 textSize = DrawTextAnchored( Vector2Scale(comboTextureSize, 0.5), (Vector2){0.5, 0.5}, MAIN_FONT, str, 200, 0.0, WHITE);
-                float half = (1.0 - (textSize.y / comboTextureSize.y)) / 2.0;
-                cutoff = Remap(cutoff, 0.0, 1.0, half + 0.1, 1.0 - half - 0.15);
-            } EndTextureMode();
-            
-            BeginShaderMode(MASK_SHADER); {
-                //DrawTexture(comboTexture.texture, 50, 50, WHITE);
+                float cutoff = currentWorld.snake.comboLevel - floor(currentWorld.snake.comboLevel);
+                float colorBonus = currentWorld.snake.comboHealth;
+                BeginTextureMode(comboTexture); {
+                    ClearBackground((Color){0});
+                    Vector2 textSize = DrawTextAnchored( Vector2Scale(comboTextureSize, 0.5), (Vector2){0.5, 0.5}, MAIN_FONT, str, 200, 0.0, WHITE);
+                    float half = (1.0 - (textSize.y / comboTextureSize.y)) / 2.0;
+                    cutoff = Remap(cutoff, 0.0, 1.0, half + 0.1, 1.0 - half - 0.15);
+                } EndTextureMode();
                 
-                SetShaderValue(MASK_SHADER, GetShaderLocation(MASK_SHADER, "cutoff"), &cutoff, SHADER_UNIFORM_FLOAT);
-                
+                BeginShaderMode(MASK_SHADER); {
+                    //DrawTexture(comboTexture.texture, 50, 50, WHITE);
+                    
+                    SetShaderValue(MASK_SHADER, GetShaderLocation(MASK_SHADER, "cutoff"), &cutoff, SHADER_UNIFORM_FLOAT);
+                    
 
-                GLSLColor color2 = glslColor(ColorLerp(COLOR_BG, COLOR_MAIN, 0.1 + colorBonus * 0.1));
-                GLSLColor color1 = glslColor(ColorLerp(COLOR_BG, COLOR_MAIN, 0.2 + colorBonus * 0.1));
-                color1.a = Lerp(0.5, 1.0, currentWorld.snake.comboHealth);
-                color2.a = color1.a;
-                SetShaderValue(MASK_SHADER, GetShaderLocation(MASK_SHADER, "col1"), &color1, SHADER_UNIFORM_VEC4);
-                SetShaderValue(MASK_SHADER, GetShaderLocation(MASK_SHADER, "col2"), &color2, SHADER_UNIFORM_VEC4);
+                    GLSLColor color2 = glslColor(ColorLerp(COLOR_BG, COLOR_MAIN, 0.1 + colorBonus * 0.1));
+                    GLSLColor color1 = glslColor(ColorLerp(COLOR_BG, COLOR_MAIN, 0.2 + colorBonus * 0.1));
+                    color1.a = Lerp(0.5, 1.0, currentWorld.snake.comboHealth);
+                    color2.a = color1.a;
+                    SetShaderValue(MASK_SHADER, GetShaderLocation(MASK_SHADER, "col1"), &color1, SHADER_UNIFORM_VEC4);
+                    SetShaderValue(MASK_SHADER, GetShaderLocation(MASK_SHADER, "col2"), &color2, SHADER_UNIFORM_VEC4);
 
-                DrawTextureRec(comboTexture.texture, (Rectangle){ 0, 0, comboTexture.texture.width, -comboTexture.texture.height}, Vector2Subtract(drawPosition, Vector2Multiply(comboTextureSize, (Vector2){0.5, 1.0})), WHITE);
-                // DrawTexturePro(comboTexture.texture, (Rectangle){ 0, 0, comboTexture.texture.width, -comboTexture.texture.height}, 
-                // (Rectangle){ drawPosition.x - comboTexture.texture.width / 2, drawPosition.y - comboTexture.texture.height / 2, comboTexture.texture.width, -comboTexture.texture.height}, 
-                // Vector2Zero(), 0, WHITE);
-            } EndShaderMode();
+                    DrawTextureRec(comboTexture.texture, (Rectangle){ 0, 0, comboTexture.texture.width, -comboTexture.texture.height}, Vector2Subtract(drawPosition, Vector2Multiply(comboTextureSize, (Vector2){0.5, 1.0})), WHITE);
+                    // DrawTexturePro(comboTexture.texture, (Rectangle){ 0, 0, comboTexture.texture.width, -comboTexture.texture.height}, 
+                    // (Rectangle){ drawPosition.x - comboTexture.texture.width / 2, drawPosition.y - comboTexture.texture.height / 2, comboTexture.texture.width, -comboTexture.texture.height}, 
+                    // Vector2Zero(), 0, WHITE);
+                } EndShaderMode();
 
-            sprintf(str, "%d", (int) floor(currentWorld.snake.score));
-            DrawTextAnchored(drawPosition, (Vector2){0.5, 0.0}, MAIN_FONT, str, 50, 0.0, ColorLerp(COLOR_BG, COLOR_MAIN, 0.1));
+                sprintf(str, "%d", (int) floor(currentWorld.snake.score));
+                DrawTextAnchored(drawPosition, (Vector2){0.5, 0.0}, MAIN_FONT, str, 50, 0.0, ColorLerp(COLOR_BG, COLOR_MAIN, 0.1));
+            } else {
+                Vector2 drawPosition = RectangleCenter(currentWorld.water.bounds);
+                DrawTextAnchored(drawPosition, (Vector2){0.5, 1.0}, MAIN_FONT, "[WASD] to Move.", 50, 0.0, ColorLerp(COLOR_BG, COLOR_MAIN, 0.3));
+                DrawTextAnchored(drawPosition, (Vector2){0.5, 0.0}, MAIN_FONT, "[Space] to Dash.", 50, 0.0, ColorLerp(COLOR_BG, COLOR_MAIN, 0.3));
+            }
             
 
             boidsRender(&currentWorld.boids);
@@ -1120,16 +1244,16 @@ int main(void) {
 
             
 
-            sprintf(str, "%d", (int) floor(currentWorld.snake.score));
-            DrawText(str, screenSize.x / 2, 20, 20, COLOR_MAIN);
-            sprintf(str, "%d", (int) floor(currentWorld.snake.comboLevel));
-            DrawText(str, screenSize.x / 2, 40, 20, COLOR_MAIN);
-            sprintf(str, "%d%",  (int) (currentWorld.snake.comboHealth * 100));
-            DrawText(str, screenSize.x / 2, 60, 20, COLOR_MAIN);
+            // sprintf(str, "%d", (int) floor(currentWorld.snake.score));
+            // DrawText(str, screenSize.x / 2, 20, 20, COLOR_MAIN);
+            // sprintf(str, "%d", (int) floor(currentWorld.snake.comboLevel));
+            // DrawText(str, screenSize.x / 2, 40, 20, COLOR_MAIN);
+            // sprintf(str, "%d%",  (int) (currentWorld.snake.comboHealth * 100));
+            // DrawText(str, screenSize.x / 2, 60, 20, COLOR_MAIN);
 
-            BeginShaderMode(MASK_SHADER); {
-                DrawTexture(PLANE_SPRITE, 20, 20, COLOR_MAIN);
-            }
+            // BeginShaderMode(MASK_SHADER); {
+            //     DrawTexture(PLANE_SPRITE, 20, 20, COLOR_MAIN);
+            // }
             //DrawText("Congrats! You created your first window!", 190, 200, 20, LIGHTGRAY);
             DrawFPS(10, 10);
         } EndDrawing();
