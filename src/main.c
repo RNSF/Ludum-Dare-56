@@ -1,5 +1,6 @@
 #include <stdlib.h>
 #include <assert.h>
+#include <stdint.h>
 #include "raylib.h"
 #include "game.h"
 #include "array.h"
@@ -23,7 +24,12 @@
 // ..Header
 ////////////////////////////////////////////
 
+enum Flag {
+    FLAG_DEAD = 1,
+};
+
 typedef struct Boid {
+    uint32_t flags;
     Vector2 position;
     Vector2 velocity;
 } Boid;
@@ -41,14 +47,38 @@ typedef struct BoidChunk {
 typedef struct Snake {
     Vector2 position;
     Vector2 velocity;
+    float boostPercent;
+    float boostColdownTimer;
+    float score;
+    float comboLevel;
+    float comboHealth;
 } Snake;
+
+typedef struct WaterNode {
+    Vector2 restingPosition;
+    float forceOffsetY;
+    float naturalOffsetY;
+    float velocityY;
+} WaterNode;
+
+typedef struct WaterBody {
+    Rectangle bounds;
+    Array nodes; //WaterNode
+} WaterBody;
+
+typedef struct WaterWave {
+    float magnitude;
+    float period;
+    float speed;
+    float offset;
+} WaterWave;
 
 typedef struct World {
     Array boids;
     BoidMap boidMap;
     Snake snake;
     Rectangle bounds;
-    Rectangle waterBounds;
+    WaterBody water;
 } World;
 
 
@@ -110,6 +140,10 @@ Vector2 RectangleCenter(Rectangle rect) {
     return (Vector2){rect.x + rect.width / 2, rect.y + rect.height / 2};
 }
 
+Rectangle RectangleReduceAll(Rectangle rect, float amount) {
+    return (Rectangle){rect.x + amount, rect.y + amount, rect.width - amount * 2, rect.height - amount * 2};
+}
+
 float RectangleLeft(Rectangle rect) {
     return rect.x;
 }
@@ -132,6 +166,118 @@ float RectangleBottom(Rectangle rect) {
 
 void loadSprites() {
     
+}
+
+
+////////////////////////////////////////////
+// ..Water
+////////////////////////////////////////////
+
+#define WATER_SPRING_CONSTANT 150
+#define WATER_DAMPENING 0.025
+
+void initWaterBody(WaterBody* water, Rectangle bounds, float nodesPerDistance) {
+
+    unsigned int nodeCount = ceil(bounds.width * nodesPerDistance);
+    assert(nodeCount > 1);
+
+    water->nodes = aCreate(nodeCount, sizeof(WaterNode));
+    water->nodes.used = water->nodes.size;
+    water->bounds = bounds;
+
+    Vector2 boundsTopLeft = RectangleTopLeft(bounds);
+
+    for ITERATE(i, water->nodes.used) {
+        WaterNode* waterNode = aGet(&water->nodes, i);
+        waterNode->restingPosition = Vector2Add(boundsTopLeft, (Vector2){bounds.width * ((float) i) / (water->nodes.used - 1), 0});
+    }
+}
+
+void cleanWaterBody(WaterBody* water) {
+    aFree(&water->nodes);
+}
+
+
+Vector2 getWaterNodePosition(WaterNode* waterNode) {
+    return Vector2Add(waterNode->restingPosition, (Vector2){0, waterNode->forceOffsetY + waterNode->naturalOffsetY});
+}
+
+Vector2 getWaterNodeForcedPosition(WaterNode* waterNode) {
+    return Vector2Add(waterNode->restingPosition, (Vector2){0, waterNode->forceOffsetY});
+}
+
+
+float waveAt(WaterWave* wave, float x, float t) {
+    return wave->magnitude * sin(-wave->speed * t + 2 * PI * (x / wave->period - wave->offset));
+}
+
+void waterBodyUpdate(WaterBody* water, float delta) {
+    
+    for ITERATE(i, water->nodes.used) {
+        WaterNode* waterNode = aGet(&water->nodes, i);
+        waterNode->velocityY -= WATER_SPRING_CONSTANT * waterNode->forceOffsetY * delta;
+        
+        Vector2 referencePosition = getWaterNodeForcedPosition(waterNode);
+
+        int connectedNodes[] = {i - 1, i + 1};
+
+        for ITERATE(ji, 2) {
+            int j = connectedNodes[ji];
+
+            if (aHas(&water->nodes, j)) {
+                WaterNode* otherNode = aGet(&water->nodes, j);
+                Vector2 displacement = Vector2Subtract(getWaterNodeForcedPosition(otherNode), referencePosition);
+                waterNode->velocityY += WATER_SPRING_CONSTANT * displacement.y  * delta;
+            }
+        }
+
+        waterNode->velocityY *= pow(WATER_DAMPENING, delta);
+        
+    }
+
+    
+}
+
+void waterBodyMove(WaterBody* water, Array* waves, float time, float delta) {
+
+    for ITERATE(i, water->nodes.used) {
+        WaterNode* waterNode = aGet(&water->nodes, i);
+        waterNode->forceOffsetY += waterNode->velocityY * delta;
+
+        waterNode->naturalOffsetY = 0.0;
+
+        for ITERATE(j, waves->used) {
+            WaterWave* wave = aGet(waves, j);
+            waterNode->naturalOffsetY += waveAt(wave, waterNode->restingPosition.x, time);
+        }
+    }
+}
+
+void waterBodyRender(WaterBody* water) {
+
+    Array splinePositions = aCreate(water->nodes.used, sizeof(Vector2));
+    splinePositions.used = splinePositions.size;
+
+    for ITERATE(i, water->nodes.used) {
+        WaterNode* waterNode = aGet(&water->nodes, i);
+        Vector2 position = getWaterNodePosition(waterNode);
+        aSet(&splinePositions, i, &position);
+    }
+
+    DrawSplineLinear(splinePositions.array, splinePositions.used, 5, WHITE);
+    aFree(&splinePositions);
+}
+
+WaterNode* getNearestWaterNode(WaterBody* water, Vector2 position) {
+
+    int nodeId = position.x / water->bounds.width * water->nodes.used;
+    nodeId = Clamp(nodeId, 0, water->nodes.used - 1);
+    WaterNode* waterNode = aGet(&water->nodes, nodeId);
+    return waterNode;
+}
+
+bool inWater(WaterBody* water, Vector2 position) {
+    return CheckCollisionPointRec(position, water->bounds);
 }
 
 
@@ -220,7 +366,7 @@ void getBoidsIn(BoidMap* boidMap, Vector2 position, float radius, Array* output)
 
 #define BOID_VISION_RADIUS 40
 #define BOID_SEPARATION_RADIUS 16
-#define BOID_AVOIDANCE_RADIUS 100
+#define BOID_AVOIDANCE_RADIUS 60
 #define BOID_WALL_VISION_RADIUS 100
 
 #define BOID_SEPARATION_C 50
@@ -231,6 +377,25 @@ void getBoidsIn(BoidMap* boidMap, Vector2 position, float radius, Array* output)
 
 #define BOID_MIN_SPEED 100
 #define BOID_MAX_SPEED 200
+
+#define BOID_RADIUS 2
+
+
+
+void clearDeadBoids(Array* boids) {
+    size_t aliveBoidCount = 0;
+    for ITERATE(i, boids->used) {
+        Boid* boid = aGet(boids, i);
+        bool isDead = (boid->flags & FLAG_DEAD) != 0;
+
+        if (!isDead)
+            aSet(boids, aliveBoidCount, boid);
+
+        aliveBoidCount += !isDead;
+    }
+
+    boids->used = aliveBoidCount;
+}
 
 
 void clearBoidMap(BoidMap* boidMap) {
@@ -263,7 +428,7 @@ void populateBoidMap(BoidMap* boidMap, Array* boids) {
 }
 
 void spawnBoid(World* world, Vector2 position) {
-    Boid boid = {position, (Vector2){BOID_MAX_SPEED, 0}};
+    Boid boid = {0, position, (Vector2){BOID_MAX_SPEED, 0}};
     aAppend(&world->boids, &boid);
     //printf("SPAWN BOID\n");
 }
@@ -328,10 +493,13 @@ void boidsReact(Array* boids, BoidMap* boidMap, Rectangle bounds, Vector2 pointT
 }
 
 void boidsMove(Array* boids, Rectangle bounds, float delta) {
+
+    Rectangle clampBounds = RectangleReduceAll(bounds, BOID_RADIUS);
+
     for ITERATE(i, boids->used) {
-         Boid* boid = aGet(boids, i);
-         boid->position = Vector2Add(boid->position, Vector2Scale(boid->velocity, delta));
-         boid->position = Vector2Clamp(boid->position, RectangleTopLeft(bounds), Vector2Subtract(RectangleBottomRight(bounds), Vector2Side(0.001)));
+        Boid* boid = aGet(boids, i);
+        boid->position = Vector2Add(boid->position, Vector2Scale(boid->velocity, delta));
+        boid->position = Vector2Clamp(boid->position, RectangleTopLeft(clampBounds), RectangleBottomRight(clampBounds));
     }
 }
 
@@ -339,7 +507,7 @@ void boidsRender(Array* boids)
 {
     for ITERATE(i, boids->used) {
         Boid* boid = aGet(boids, i);
-        DrawCircle(boid->position.x, boid->position.y, 2, WHITE);
+        DrawCircle(boid->position.x, boid->position.y, BOID_RADIUS, WHITE);
     }
 }
 
@@ -348,30 +516,104 @@ void boidsRender(Array* boids)
 // ..Snake
 ////////////////////////////////////////////
 
-#define SNAKE_MAX_SPEED 300
-#define SNAKE_ACCELERATION 600
+#define SNAKE_MAX_SPEED 400
+#define SNAKE_ACCELERATION 800
+#define SNAKE_HITBOX_RADIUS 20
+#define SNAKE_BOOST_MAX_SPEED 600
+#define SNAKE_HEAD_RADIUS 20
+#define SNAKE_BOOST_ACCELERATION SNAKE_BOOST_MAX_SPEED * FPS
+#define SNAKE_FRICTION_C 0.02
+#define GRAVITY 800
+#define SNAKE_BOUNCE_DAMPENING 0.6
 
+void snakeUpdate(Snake* snake, WaterBody* water, float delta) {
+    assert(delta >= 0);
 
-void snakeUpdate(Snake* snake, float delta) {
+    if (!inWater(water, snake->position)) {
+        snake->velocity.y += GRAVITY * delta;
+        return;
+    }
+
     Vector2 targetDirection = Vector2Normalize((Vector2) {
         IsKeyDown(KEY_D) - IsKeyDown(KEY_A),
         IsKeyDown(KEY_S) - IsKeyDown(KEY_W),
     });
 
-    Vector2 targetVelocity = Vector2Scale(targetDirection, SNAKE_MAX_SPEED);
+    if (IsKeyPressed(KEY_LEFT_SHIFT)) {
+        snake->velocity = Vector2Scale(targetDirection, SNAKE_BOOST_MAX_SPEED);
+    } else {
+        snake->boostPercent = 0.0;
+    }
+    
+
+    float maxSpeed =        Lerp(SNAKE_MAX_SPEED    , SNAKE_BOOST_MAX_SPEED     , snake->boostPercent);
+    float acceleration =    Lerp(SNAKE_ACCELERATION , SNAKE_BOOST_ACCELERATION  , snake->boostPercent);
+
+    Vector2 targetVelocity = Vector2Scale(targetDirection, fmax(maxSpeed, Vector2Length(snake->velocity)));
     Vector2 velocityDifference = Vector2Subtract(targetVelocity, snake->velocity);
     Vector2 accelerationDirection = Vector2Normalize(velocityDifference);
-    snake->velocity = Vector2Add(snake->velocity, Vector2ClampValue(Vector2Scale(accelerationDirection, SNAKE_ACCELERATION * delta), 0, Vector2Length(velocityDifference)));
-    snake->velocity = Vector2ClampValue(snake->velocity, 0, SNAKE_MAX_SPEED);
+    snake->velocity = Vector2Add(snake->velocity, Vector2ClampValue(Vector2Scale(accelerationDirection, acceleration * delta), 0, Vector2Length(velocityDifference)));
+    snake->velocity = Vector2Add(snake->velocity, Vector2Scale(snake->velocity, -SNAKE_FRICTION_C * delta));
+    snake->velocity = Vector2ClampValue(snake->velocity, 0, fmax(maxSpeed, Vector2Length(snake->velocity)));
 }
 
-void snakeMove(Snake* snake, float delta) {
+void snakeMove(Snake* snake, Rectangle bounds, WaterBody* water, float delta) {
+    Vector2 oldPosition = snake->position;
     snake->position = Vector2Add(snake->position, Vector2Scale(snake->velocity, delta));
+    Rectangle clampBounds = RectangleReduceAll(bounds, SNAKE_HEAD_RADIUS);
+
+    if (snake->position.x < RectangleLeft(clampBounds))     snake->velocity.x = abs(snake->velocity.x)  * SNAKE_BOUNCE_DAMPENING;
+    if (snake->position.x >= RectangleRight(clampBounds))   snake->velocity.x = -abs(snake->velocity.x) * SNAKE_BOUNCE_DAMPENING;
+    if (snake->position.y < RectangleTop(clampBounds))      snake->velocity.y = abs(snake->velocity.y)  * SNAKE_BOUNCE_DAMPENING;
+    if (snake->position.y >= RectangleBottom(clampBounds))  snake->velocity.y = -abs(snake->velocity.y) * SNAKE_BOUNCE_DAMPENING;
+
+    bool wasInWater = inWater(water, oldPosition);
+    bool nowInWater = inWater(water, snake->position);
+
+    if (wasInWater != nowInWater) {
+        WaterNode* waterNode = getNearestWaterNode(water, snake->position);
+        waterNode->velocityY = snake->velocity.y * 1.2;
+        printf("SPLASH\n");
+    }
 }
 
 void snakeRender(Snake* snake) {
-    DrawCircle(snake->position.x, snake->position.y, 14, WHITE);
+    DrawCircle(snake->position.x, snake->position.y, SNAKE_HEAD_RADIUS, WHITE);
 }
+
+void snakeEat(Snake* snake, Array* boids, float delta) {
+
+    Vector2 snakeDirection = Vector2Normalize(snake->velocity);
+    Vector2 hitboxPosition = Vector2Add(snake->position, Vector2Scale(snakeDirection, 10));
+    unsigned int boidsEaten = 0;
+
+    for ITERATE(i, boids->used) {
+        Boid* boid = aGet(boids, i);
+        bool isDead = (boid->flags & FLAG_DEAD);
+        bool isEaten = !isDead && CheckCollisionCircles(boid->position, BOID_RADIUS, hitboxPosition, SNAKE_HITBOX_RADIUS);
+
+        if (isEaten) {
+            boid->flags |= FLAG_DEAD;
+            boidsEaten += 1;
+        }
+    }
+
+    snake->score += boidsEaten * pow(2, floor(snake->comboLevel));
+    snake->comboLevel += boidsEaten / (snake->comboLevel + 1) * 0.1;
+    snake->comboHealth += boidsEaten * 0.01 / (snake->comboLevel + 1);
+    snake->comboHealth -= delta * 0.2 * (snake->comboLevel > 0);
+
+    snake->comboHealth = Clamp( snake->comboHealth, 0.0, 1.0);
+    // Reset
+    if (snake->comboHealth <= 0) {
+        snake->comboLevel = 0.0;
+        snake->comboHealth = 1.0;
+    }
+}
+
+
+
+
 
 
 
@@ -384,16 +626,25 @@ void initWorld(World* world, Rectangle bounds, float waterLine)
     world->boids = aCreate(128, sizeof(Boid));
     initBoidMap(&world->boidMap, Vector2Ceil(Vector2Divide(RectangleSize(bounds), CHUNK_SIZE)));
     world->snake.position = RectangleCenter(bounds);
+    world->snake.boostPercent = 0.0;
+    world->snake.boostColdownTimer = 0.0;
+    world->snake.score = 0.0;
+    world->snake.comboLevel = 0.0;
+    world->snake.comboHealth = 1.0;
+
+
     world->bounds = bounds;
-    world->waterBounds = bounds;
-    world->waterBounds.y += waterLine;
-    world->waterBounds.height -= waterLine;
+    Rectangle waterBounds = bounds;
+    waterBounds.y += waterLine;
+    waterBounds.height -= waterLine;
+    initWaterBody(&world->water, waterBounds, 0.1);
 }
 
 void cleanWorld(World* world)
 {
     aFree(&world->boids);
     cleanBoidMap(&world->boidMap);
+    cleanWaterBody(&world->water);
 }
 
 ////////////////////////////////////////////
@@ -412,6 +663,15 @@ int main(void) {
 
     World currentWorld;
     initWorld(&currentWorld, RectangleFromSize(screenSize), 200.0);
+
+    Array waves = aCreate(2, sizeof(WaterWave));
+    {
+        WaterWave wave;
+        wave = (WaterWave){1.0, 200.0, 2.0, 0.0}; aAppend(&waves, &wave);
+        wave = (WaterWave){1.0, 73.0, -3, 0.3}; aAppend(&waves, &wave);
+        wave = (WaterWave){0.5, 13.0, 4, -0.3}; aAppend(&waves, &wave);
+    }
+    float fixedTime = 0.0;
 
     InitWindow(screenSize.x, screenSize.y, "raylib [core] example - basic window");
 
@@ -434,14 +694,20 @@ int main(void) {
             }
             
         }
+        
 
+        clearDeadBoids(&currentWorld.boids);
         clearBoidMap(&currentWorld.boidMap);
         populateBoidMap(&currentWorld.boidMap, &currentWorld.boids);
-        boidsReact(&currentWorld.boids, &currentWorld.boidMap, currentWorld.waterBounds, currentWorld.snake.position, FIXED_DELTA);
-        boidsMove(&currentWorld.boids, currentWorld.waterBounds, FIXED_DELTA);
+        boidsReact(&currentWorld.boids, &currentWorld.boidMap, currentWorld.water.bounds, currentWorld.snake.position, FIXED_DELTA);
+        boidsMove(&currentWorld.boids, currentWorld.water.bounds, FIXED_DELTA);
 
-        snakeUpdate(&currentWorld.snake, FIXED_DELTA);
-        snakeMove(&currentWorld.snake, FIXED_DELTA);
+        snakeUpdate(&currentWorld.snake, &currentWorld.water, FIXED_DELTA);
+        snakeMove(&currentWorld.snake, currentWorld.bounds, &currentWorld.water, FIXED_DELTA);
+        snakeEat(&currentWorld.snake, &currentWorld.boids, FIXED_DELTA);
+
+        waterBodyUpdate(&currentWorld.water, FIXED_DELTA);
+        waterBodyMove(&currentWorld.water, &waves, fixedTime, FIXED_DELTA);
         
         // Draw
         //----------------------------------------------------------------------------------
@@ -451,11 +717,21 @@ int main(void) {
 
             boidsRender(&currentWorld.boids);
             snakeRender(&currentWorld.snake);
+            waterBodyRender(&currentWorld.water);
 
+            char str[8];
+            sprintf(str, "%d", (int) floor(currentWorld.snake.score));
+            DrawText(str, screenSize.x / 2, 20, 20, WHITE);
+            sprintf(str, "%d", (int) floor(currentWorld.snake.comboLevel));
+            DrawText(str, screenSize.x / 2, 40, 20, WHITE);
+            sprintf(str, "%d%",  (int) (currentWorld.snake.comboHealth * 100));
+            DrawText(str, screenSize.x / 2, 60, 20, WHITE);
             //DrawText("Congrats! You created your first window!", 190, 200, 20, LIGHTGRAY);
-
+            DrawFPS(10, 10);
         EndDrawing();
         //----------------------------------------------------------------------------------
+
+        fixedTime += FIXED_DELTA;
     }
 
     // De-Initialization

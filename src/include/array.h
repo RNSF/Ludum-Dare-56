@@ -96,3 +96,10 @@ extern inline void* aGet(Array *a, size_t i)
   return (a->array + i * a->elementSize);
 }
 
+
+extern inline void* aSet(Array *a, size_t i, void* element)
+{
+  assert(aHas(a, i));
+  return memcpy(a->array + i * a->elementSize, element, a->elementSize);
+}
+
