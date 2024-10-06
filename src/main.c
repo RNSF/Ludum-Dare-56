@@ -26,12 +26,18 @@
 
 enum Flag {
     FLAG_DEAD = 1,
+    FLAG_SPAWNING = 2,
+    FLAG_DROPPED = 4,
 };
 
-typedef struct Boid {
+typedef struct Entity {
     uint32_t flags;
     Vector2 position;
     Vector2 velocity;
+} Entity;
+
+typedef struct Boid {
+    Entity entity;
 } Boid;
 
 typedef struct BoidMap {
@@ -45,8 +51,7 @@ typedef struct BoidChunk {
 } BoidChunk;
 
 typedef struct Snake {
-    Vector2 position;
-    Vector2 velocity;
+    Entity entity;
     float boostPercent;
     float boostColdownTimer;
     float score;
@@ -73,12 +78,19 @@ typedef struct WaterWave {
     float offset;
 } WaterWave;
 
+typedef struct BoidBomb {
+    Entity entity;
+    unsigned int boidCount;
+} BoidBomb;
+
 typedef struct World {
     Array boids;
+    Array boidBombs;
     BoidMap boidMap;
     Snake snake;
     Rectangle bounds;
     WaterBody water;
+    float boidBombSpawnTime;
 } World;
 
 
@@ -160,21 +172,90 @@ float RectangleBottom(Rectangle rect) {
     return rect.y + rect.height;
 }
 
+float RandFloat() {
+    return ((float) rand()) / RAND_MAX;
+}
+
+bool RandBool() {
+    return rand() & 1;
+}
+
+
+
+////////////////////////////////////////////
+// ..Draw
+////////////////////////////////////////////
+
+// Draw anchored
+void DrawSpriteAnchored(Texture2D texture, Vector2 position, float rotation, Vector2 anchor, Color tint) {
+    DrawTexturePro(texture, (Rectangle) { 0, 0, texture.width, texture.height }, 
+                            (Rectangle) { position.x, position.y, texture.width, texture.height },
+                    Vector2Multiply(anchor, (Vector2){ texture.width , texture.height}), rotation, tint
+    );
+}
+
+void DrawSpriteAnchoredScaled(Texture2D texture, Vector2 position, float rotation, Vector2 scale, Vector2 anchor, Color tint) {
+    DrawTexturePro(texture, (Rectangle) {0, 0, texture.width, texture.height},
+        (Rectangle) {
+        position.x, 
+        position.y, 
+        texture.width * scale.x, texture.height  * scale.y
+    },
+        Vector2Multiply(anchor, (Vector2) { texture.width* scale.x, texture.height * scale.y }), rotation, tint
+    );
+}
+
+void DrawTextAnchored(Vector2 position, Vector2 anchor, Font font, const char* text, int fontSize, float spacing, Color color) {
+    Vector2 textSize = MeasureTextEx(font, text, fontSize, spacing);
+    Vector2 drawPosition = Vector2Subtract(position, Vector2Multiply(textSize, anchor));
+    DrawTextEx(font, text, drawPosition, fontSize, spacing, color);
+}
+
+
 ////////////////////////////////////////////
 // ..Images
 ////////////////////////////////////////////
 
+Texture2D PLANE_SPRITE;
+Texture2D MANDIBLE_SPRITE;
+Texture2D STRING_SPRITE;
+Texture2D FISH_ICON_SPRITE;
+
 void loadSprites() {
-    
+    PLANE_SPRITE        = LoadTexture("assets/sprites/plane.png");
+    MANDIBLE_SPRITE     = LoadTexture("assets/sprites/mandible.png");
+    STRING_SPRITE       = LoadTexture("assets/sprites/string.png");
+    FISH_ICON_SPRITE    = LoadTexture("assets/sprites/fish_icon.png");
 }
 
+
+////////////////////////////////////////////
+// ..Entity
+////////////////////////////////////////////
+
+#define GRAVITY 600
+
+void clearDeadEntities(Array* entities) {
+    size_t aliveBoidCount = 0;
+    for ITERATE(i, entities->used) {
+        Entity* entity = aGet(entities, i);
+        bool isDead = (entity->flags & FLAG_DEAD) != 0;
+
+        if (!isDead)
+            aSet(entities, aliveBoidCount, entity);
+
+        aliveBoidCount += !isDead;
+    }
+
+    entities->used = aliveBoidCount;
+}
 
 ////////////////////////////////////////////
 // ..Water
 ////////////////////////////////////////////
 
 #define WATER_SPRING_CONSTANT 150
-#define WATER_DAMPENING 0.025
+#define WATER_DAMPENING 0.020
 
 void initWaterBody(WaterBody* water, Rectangle bounds, float nodesPerDistance) {
 
@@ -355,7 +436,7 @@ void getBoidsIn(BoidMap* boidMap, Vector2 position, float radius, Array* output)
         // append boid only if within radius
         for ITERATE(i, chunk->boidCount) {
             Boid* boid = chunk->boids[i];
-            if (Vector2Distance(boid->position, position) <= radius) {
+            if (Vector2Distance(boid->entity.position, position) <= radius) {
                 aAppend(output, &boid);
             }
         }
@@ -382,20 +463,7 @@ void getBoidsIn(BoidMap* boidMap, Vector2 position, float radius, Array* output)
 
 
 
-void clearDeadBoids(Array* boids) {
-    size_t aliveBoidCount = 0;
-    for ITERATE(i, boids->used) {
-        Boid* boid = aGet(boids, i);
-        bool isDead = (boid->flags & FLAG_DEAD) != 0;
 
-        if (!isDead)
-            aSet(boids, aliveBoidCount, boid);
-
-        aliveBoidCount += !isDead;
-    }
-
-    boids->used = aliveBoidCount;
-}
 
 
 void clearBoidMap(BoidMap* boidMap) {
@@ -410,7 +478,7 @@ void clearBoidMap(BoidMap* boidMap) {
 void populateBoidMap(BoidMap* boidMap, Array* boids) {
     for ITERATE(i, boids->used) {
         Boid* boid = aGet(boids, i);
-        BoidChunk* boidChunk = getChunk(boidMap, getChunkPosition(boid->position));
+        BoidChunk* boidChunk = getChunk(boidMap, getChunkPosition(boid->entity.position));
         
         if (!boidChunk) {
            //  printf("Boid outside of world!");
@@ -427,19 +495,50 @@ void populateBoidMap(BoidMap* boidMap, Array* boids) {
     }
 }
 
-void spawnBoid(World* world, Vector2 position) {
-    Boid boid = {0, position, (Vector2){BOID_MAX_SPEED, 0}};
+void spawnBoid(World* world, Vector2 position, Vector2 velocity) {
+    Boid boid;
+    boid.entity.position = position;
+    boid.entity.velocity = velocity;
+    boid.entity.flags = 0 | FLAG_SPAWNING;
     aAppend(&world->boids, &boid);
     //printf("SPAWN BOID\n");
 }
 
-void boidsReact(Array* boids, BoidMap* boidMap, Rectangle bounds, Vector2 pointToAvoid, float delta) {
+Vector2 getRandomBoidVelocity() {
+    return  Vector2Rotate((Vector2){Lerp(BOID_MIN_SPEED, BOID_MAX_SPEED, RandFloat()), 0}, RandFloat() * 2 * PI);
+}
+
+void boidExplosiveSpawn(World* world, Vector2 position, unsigned int countToSpawn) {
+    unsigned int spawnSizeSide = ceil(sqrt(countToSpawn));
+    unsigned int countSpawned = 0;
+
+    Vector2 spawnSize = Vector2Side(spawnSizeSide);
+    Vector2 spawnTopLeft = Vector2Subtract(position, Vector2Scale(spawnSize, 0.5));
+    for ITERATE(x, spawnSize.x)
+    for ITERATE(y, spawnSize.y) {
+        if (countSpawned >= countToSpawn) return;
+
+        spawnBoid(world, Vector2Add(spawnTopLeft, (Vector2){x, y}), getRandomBoidVelocity());
+        countSpawned++;
+    }
+}
+
+
+void boidsReact(Array* boids, BoidMap* boidMap, WaterBody* water, Rectangle bounds, Vector2 pointToAvoid, float delta) {
+
+    
 
     Array flockBoids = aCreate(128, sizeof(Boid*));
     for ITERATE(i, boids->used) {
-        flockBoids.used = 0;
         Boid* boid = aGet(boids, i);
-        getBoidsIn(boidMap, boid->position, BOID_VISION_RADIUS, &flockBoids);
+        if (!inWater(water, boid->entity.position)) {
+            boid->entity.velocity.y += GRAVITY * delta;
+            continue;
+        }
+
+        flockBoids.used = 0;
+       
+        getBoidsIn(boidMap, boid->entity.position, BOID_VISION_RADIUS, &flockBoids);
 
         Vector2 separationForce = Vector2Zero();
         Vector2 alignmentForce  = Vector2Zero();
@@ -447,36 +546,43 @@ void boidsReact(Array* boids, BoidMap* boidMap, Rectangle bounds, Vector2 pointT
         Vector2 avoidanceForce  = Vector2Zero();
         Vector2 wallForce   = Vector2Zero();
 
+        
+
         if (flockBoids.used) {
+            unsigned int boidsUsed = 0;
+
             Vector2 totalDisplacement = Vector2Zero();
             Vector2 totalVelocity = Vector2Zero();
             Vector2 totalPosition = Vector2Zero();
 
             for ITERATE(j, flockBoids.used) {
                 Boid* flockBoid = *(Boid**) aGet(&flockBoids, j);
-                //if (flockBoid == boid) continue;
+                if (flockBoid->entity.flags & FLAG_SPAWNING) continue;
 
-                Vector2 displacement = Vector2Subtract(boid->position, flockBoid->position);
+                Vector2 displacement = Vector2Subtract(boid->entity.position, flockBoid->entity.position);
                 if (Vector2LengthSqr(displacement) <= BOID_SEPARATION_RADIUS * BOID_SEPARATION_RADIUS) 
                     totalDisplacement = Vector2Add(totalDisplacement, displacement); // separation: s BOID_AVOIDANCE_RADIUS 40teer to avoid crowding local flockmates
-                totalVelocity = Vector2Add(totalVelocity, flockBoid->velocity);      // alignment: steer towards the average heading of local flockmates
-                totalPosition = Vector2Add(totalPosition, flockBoid->position);      // cohesion: steer to move towards the average position (center of mass) of local flockmates
+                totalVelocity = Vector2Add(totalVelocity, flockBoid->entity.velocity);      // alignment: steer towards the average heading of local flockmates
+                totalPosition = Vector2Add(totalPosition, flockBoid->entity.position);      // cohesion: steer to move towards the average position (center of mass) of local flockmates
+                boidsUsed++;
             }
 
-            separationForce = Vector2Scale(totalDisplacement, BOID_SEPARATION_C);
-            alignmentForce  = Vector2Scale(totalVelocity  , BOID_ALIGNMENT_C / flockBoids.used);
-            cohesionForce   = Vector2Scale(Vector2Subtract(Vector2Scale(totalPosition, 1.0 / flockBoids.used), boid->position), BOID_COHESION_C);
+            if (boidsUsed) {
+                separationForce = Vector2Scale(totalDisplacement, BOID_SEPARATION_C);
+                alignmentForce  = Vector2Scale(totalVelocity  , BOID_ALIGNMENT_C / boidsUsed);
+                cohesionForce   = Vector2Scale(Vector2Subtract(Vector2Scale(totalPosition, 1.0 / boidsUsed), boid->entity.position), BOID_COHESION_C);
+            }
         }
         
         
-        if (fabs(boid->position.x - RectangleLeft(bounds)) < BOID_WALL_VISION_RADIUS)   wallForce.x += 1;
-        if (fabs(boid->position.x - RectangleRight(bounds)) < BOID_WALL_VISION_RADIUS)  wallForce.x -= 1;
-        if (fabs(boid->position.y - RectangleTop(bounds)) < BOID_WALL_VISION_RADIUS)    wallForce.y += 1;
-        if (fabs(boid->position.y - RectangleBottom(bounds)) < BOID_WALL_VISION_RADIUS) wallForce.y -= 1;
+        if (fabs(boid->entity.position.x - RectangleLeft(bounds)) < BOID_WALL_VISION_RADIUS)   wallForce.x += 1;
+        if (fabs(boid->entity.position.x - RectangleRight(bounds)) < BOID_WALL_VISION_RADIUS)  wallForce.x -= 1;
+        if (fabs(boid->entity.position.y - RectangleTop(bounds)) < BOID_WALL_VISION_RADIUS)    wallForce.y += 1;
+        if (fabs(boid->entity.position.y - RectangleBottom(bounds)) < BOID_WALL_VISION_RADIUS) wallForce.y -= 1;
 
         wallForce = Vector2Scale(wallForce, BOID_WALL_C);
 
-        Vector2 avoidanceDisplacement = Vector2Subtract(boid->position, pointToAvoid);
+        Vector2 avoidanceDisplacement = Vector2Subtract(boid->entity.position, pointToAvoid);
         float avoidanceDisplacementLengthSqr = Vector2LengthSqr(avoidanceDisplacement);
         if (avoidanceDisplacementLengthSqr < BOID_AVOIDANCE_RADIUS * BOID_AVOIDANCE_RADIUS)
             avoidanceForce = Vector2Scale(Vector2Normalize(avoidanceDisplacement), BOID_AVOIDANCE_C);
@@ -484,31 +590,98 @@ void boidsReact(Array* boids, BoidMap* boidMap, Rectangle bounds, Vector2 pointT
         Vector2 force = Vector2Add(Vector2Add(Vector2Add(Vector2Add(separationForce, alignmentForce), cohesionForce), wallForce), avoidanceForce);
 
         if (Vector2Length(force)) {
-            boid->velocity = Vector2Add(boid->velocity, Vector2Scale(force, delta));
-            boid->velocity = Vector2Scale(Vector2Normalize(boid->velocity), Clamp(Vector2Length(boid->velocity), BOID_MIN_SPEED, BOID_MAX_SPEED));
+            boid->entity.velocity = Vector2Add(boid->entity.velocity, Vector2Scale(force, delta));
+            boid->entity.velocity = Vector2Scale(Vector2Normalize(boid->entity.velocity), Clamp(Vector2Length(boid->entity.velocity), BOID_MIN_SPEED, BOID_MAX_SPEED));
         }
     }
 
     aFree(&flockBoids);
 }
 
-void boidsMove(Array* boids, Rectangle bounds, float delta) {
+void boidsMove(Array* boids, WaterBody* water, Rectangle outerBounds, Rectangle innerBounds, float delta) {
 
-    Rectangle clampBounds = RectangleReduceAll(bounds, BOID_RADIUS);
+    Rectangle outerClampBounds = RectangleReduceAll(outerBounds, BOID_RADIUS);
+    Rectangle innerClampBounds = RectangleReduceAll(innerBounds, BOID_RADIUS);
+
+    
 
     for ITERATE(i, boids->used) {
         Boid* boid = aGet(boids, i);
-        boid->position = Vector2Add(boid->position, Vector2Scale(boid->velocity, delta));
-        boid->position = Vector2Clamp(boid->position, RectangleTopLeft(clampBounds), RectangleBottomRight(clampBounds));
+        Rectangle clampBounds = (boid->entity.flags & FLAG_SPAWNING) ? outerClampBounds : innerClampBounds;
+        boid->entity.position = Vector2Add(boid->entity.position, Vector2Scale(boid->entity.velocity, delta));
+        boid->entity.position = Vector2Clamp(boid->entity.position, RectangleTopLeft(clampBounds), RectangleBottomRight(clampBounds));
+
+        if ((boid->entity.flags & FLAG_SPAWNING) && inWater(water, boid->entity.position)) {
+            boid->entity.flags &= ~FLAG_SPAWNING;
+            assert(!(boid->entity.flags & FLAG_SPAWNING));
+            boid->entity.velocity = getRandomBoidVelocity();
+        }
     }
+
+    
 }
 
 void boidsRender(Array* boids)
 {
     for ITERATE(i, boids->used) {
         Boid* boid = aGet(boids, i);
-        DrawCircle(boid->position.x, boid->position.y, BOID_RADIUS, WHITE);
+        DrawCircle(boid->entity.position.x, boid->entity.position.y, BOID_RADIUS, WHITE);
     }
+}
+
+
+////////////////////////////////////////////
+// ..BoidBomb
+////////////////////////////////////////////
+
+float getBoidBombRadius(unsigned int boidCount) {
+    return sqrt(boidCount);
+}
+
+
+void spawnBoidBomb(World* world, Vector2 position, Vector2 velocity, unsigned int boidCount) {
+    BoidBomb boidBomb = {0};
+    boidBomb.entity.position = position;
+    boidBomb.entity.velocity = velocity;
+    boidBomb.entity.flags = 0 | FLAG_SPAWNING;
+    boidBomb.boidCount = boidCount;
+    aAppend(&world->boidBombs, &boidBomb);
+}
+
+void boidBombsMove(Array* boidBombs, Rectangle bounds, float delta) {
+    for ITERATE(i, boidBombs->used) {
+        BoidBomb* boidBomb = aGet(boidBombs, i);
+        float radius = getBoidBombRadius(boidBomb->boidCount);
+        boidBomb->entity.position = Vector2Add(boidBomb->entity.position, Vector2Scale(boidBomb->entity.velocity, delta));
+
+        bool inBounds = CheckCollisionCircleRec(boidBomb->entity.position, radius, bounds);
+        bool isSpawning = boidBomb->entity.flags & FLAG_SPAWNING;
+
+        if (inBounds) boidBomb->entity.flags &= ~FLAG_SPAWNING;
+        if (!inBounds && !isSpawning) boidBomb->entity.flags |= FLAG_DEAD;
+    }    
+}
+
+void boidBombsRender(Array* boidBombs) {
+    for ITERATE(i, boidBombs->used) {
+        BoidBomb* boidBomb = aGet(boidBombs, i);
+        float radius = getBoidBombRadius(boidBomb->boidCount);
+        int facing = boidBomb->entity.velocity.x > 0 ? 1 : -1;
+        const float planeOffsetY = -15;
+
+        DrawSpriteAnchoredScaled(PLANE_SPRITE, Vector2Add(boidBomb->entity.position, (Vector2){0, -radius + planeOffsetY}), 0, (Vector2){facing, 1}, (Vector2){0.5, 0.5}, WHITE);
+        if (!(boidBomb->entity.flags & FLAG_DROPPED)) {
+            DrawSpriteAnchoredScaled(STRING_SPRITE, Vector2Add(boidBomb->entity.position, (Vector2){0, -radius + planeOffsetY + -5}), 0, Vector2Scale(Vector2One(), radius * 2 / 50.0), (Vector2){0.5, 0.0}, WHITE);
+            DrawCircle(boidBomb->entity.position.x, boidBomb->entity.position.y, radius, WHITE);
+            DrawSpriteAnchoredScaled(FISH_ICON_SPRITE, boidBomb->entity.position, 0, Vector2Scale(Vector2One(), radius * 2 / 200.0 * 0.7), (Vector2){0.5, 0.5},  BLACK);
+        }
+    }
+}
+
+void popBoidBomb(BoidBomb* boidBomb, World* world) {
+    assert(!(boidBomb->entity.flags & FLAG_DROPPED));
+    boidBomb->entity.flags |= FLAG_DROPPED;
+    boidExplosiveSpawn(world, boidBomb->entity.position, boidBomb->boidCount);
 }
 
 
@@ -523,14 +696,16 @@ void boidsRender(Array* boids)
 #define SNAKE_HEAD_RADIUS 20
 #define SNAKE_BOOST_ACCELERATION SNAKE_BOOST_MAX_SPEED * FPS
 #define SNAKE_FRICTION_C 0.02
-#define GRAVITY 800
 #define SNAKE_BOUNCE_DAMPENING 0.6
+#define SNAKE_BOOST_COOLDOWN_TIME 1.0
 
 void snakeUpdate(Snake* snake, WaterBody* water, float delta) {
     assert(delta >= 0);
 
-    if (!inWater(water, snake->position)) {
-        snake->velocity.y += GRAVITY * delta;
+    snake->boostColdownTimer -= delta;
+
+    if (!inWater(water, snake->entity.position)) {
+        snake->entity.velocity.y += GRAVITY * delta;
         return;
     }
 
@@ -539,8 +714,11 @@ void snakeUpdate(Snake* snake, WaterBody* water, float delta) {
         IsKeyDown(KEY_S) - IsKeyDown(KEY_W),
     });
 
-    if (IsKeyPressed(KEY_LEFT_SHIFT)) {
-        snake->velocity = Vector2Scale(targetDirection, SNAKE_BOOST_MAX_SPEED);
+    bool canBoost = snake->boostColdownTimer <= 0.0;
+    if (canBoost && IsKeyPressed(KEY_LEFT_SHIFT)) {
+        // boost
+        snake->entity.velocity = Vector2Scale(targetDirection, SNAKE_BOOST_MAX_SPEED);
+        snake->boostColdownTimer = SNAKE_BOOST_COOLDOWN_TIME;
     } else {
         snake->boostPercent = 0.0;
     }
@@ -549,51 +727,52 @@ void snakeUpdate(Snake* snake, WaterBody* water, float delta) {
     float maxSpeed =        Lerp(SNAKE_MAX_SPEED    , SNAKE_BOOST_MAX_SPEED     , snake->boostPercent);
     float acceleration =    Lerp(SNAKE_ACCELERATION , SNAKE_BOOST_ACCELERATION  , snake->boostPercent);
 
-    Vector2 targetVelocity = Vector2Scale(targetDirection, fmax(maxSpeed, Vector2Length(snake->velocity)));
-    Vector2 velocityDifference = Vector2Subtract(targetVelocity, snake->velocity);
+    Vector2 targetVelocity = Vector2Scale(targetDirection, fmax(maxSpeed, Vector2Length(snake->entity.velocity)));
+    Vector2 velocityDifference = Vector2Subtract(targetVelocity, snake->entity.velocity);
     Vector2 accelerationDirection = Vector2Normalize(velocityDifference);
-    snake->velocity = Vector2Add(snake->velocity, Vector2ClampValue(Vector2Scale(accelerationDirection, acceleration * delta), 0, Vector2Length(velocityDifference)));
-    snake->velocity = Vector2Add(snake->velocity, Vector2Scale(snake->velocity, -SNAKE_FRICTION_C * delta));
-    snake->velocity = Vector2ClampValue(snake->velocity, 0, fmax(maxSpeed, Vector2Length(snake->velocity)));
+    snake->entity.velocity = Vector2Add(snake->entity.velocity, Vector2ClampValue(Vector2Scale(accelerationDirection, acceleration * delta), 0, Vector2Length(velocityDifference)));
+    snake->entity.velocity = Vector2Add(snake->entity.velocity, Vector2Scale(snake->entity.velocity, -SNAKE_FRICTION_C * delta));
+    snake->entity.velocity = Vector2ClampValue(snake->entity.velocity, 0, fmax(maxSpeed, Vector2Length(snake->entity.velocity)));
 }
 
 void snakeMove(Snake* snake, Rectangle bounds, WaterBody* water, float delta) {
-    Vector2 oldPosition = snake->position;
-    snake->position = Vector2Add(snake->position, Vector2Scale(snake->velocity, delta));
+    Vector2 oldPosition = snake->entity.position;
+    snake->entity.position = Vector2Add(snake->entity.position, Vector2Scale(snake->entity.velocity, delta));
     Rectangle clampBounds = RectangleReduceAll(bounds, SNAKE_HEAD_RADIUS);
 
-    if (snake->position.x < RectangleLeft(clampBounds))     snake->velocity.x = abs(snake->velocity.x)  * SNAKE_BOUNCE_DAMPENING;
-    if (snake->position.x >= RectangleRight(clampBounds))   snake->velocity.x = -abs(snake->velocity.x) * SNAKE_BOUNCE_DAMPENING;
-    if (snake->position.y < RectangleTop(clampBounds))      snake->velocity.y = abs(snake->velocity.y)  * SNAKE_BOUNCE_DAMPENING;
-    if (snake->position.y >= RectangleBottom(clampBounds))  snake->velocity.y = -abs(snake->velocity.y) * SNAKE_BOUNCE_DAMPENING;
+    if (snake->entity.position.x < RectangleLeft(clampBounds))     snake->entity.velocity.x = abs(snake->entity.velocity.x)  * SNAKE_BOUNCE_DAMPENING;
+    if (snake->entity.position.x >= RectangleRight(clampBounds))   snake->entity.velocity.x = -abs(snake->entity.velocity.x) * SNAKE_BOUNCE_DAMPENING;
+    if (snake->entity.position.y < RectangleTop(clampBounds))      snake->entity.velocity.y = abs(snake->entity.velocity.y)  * SNAKE_BOUNCE_DAMPENING;
+    if (snake->entity.position.y >= RectangleBottom(clampBounds))  snake->entity.velocity.y = -abs(snake->entity.velocity.y) * SNAKE_BOUNCE_DAMPENING;
 
     bool wasInWater = inWater(water, oldPosition);
-    bool nowInWater = inWater(water, snake->position);
+    bool nowInWater = inWater(water, snake->entity.position);
 
     if (wasInWater != nowInWater) {
-        WaterNode* waterNode = getNearestWaterNode(water, snake->position);
-        waterNode->velocityY = snake->velocity.y * 1.2;
+        WaterNode* waterNode = getNearestWaterNode(water, snake->entity.position);
+        waterNode->velocityY = snake->entity.velocity.y * 1.2;
         printf("SPLASH\n");
     }
 }
 
 void snakeRender(Snake* snake) {
-    DrawCircle(snake->position.x, snake->position.y, SNAKE_HEAD_RADIUS, WHITE);
+    DrawCircle(snake->entity.position.x, snake->entity.position.y, SNAKE_HEAD_RADIUS, WHITE);
 }
 
-void snakeEat(Snake* snake, Array* boids, float delta) {
+void snakeEat(Snake* snake, World* world, Array* boids, Array* boidBombs, float delta) {
 
-    Vector2 snakeDirection = Vector2Normalize(snake->velocity);
-    Vector2 hitboxPosition = Vector2Add(snake->position, Vector2Scale(snakeDirection, 10));
+    Vector2 snakeDirection = Vector2Normalize(snake->entity.velocity);
+    Vector2 hitboxPosition = Vector2Add(snake->entity.position, Vector2Scale(snakeDirection, 10));
     unsigned int boidsEaten = 0;
 
     for ITERATE(i, boids->used) {
         Boid* boid = aGet(boids, i);
-        bool isDead = (boid->flags & FLAG_DEAD);
-        bool isEaten = !isDead && CheckCollisionCircles(boid->position, BOID_RADIUS, hitboxPosition, SNAKE_HITBOX_RADIUS);
+        bool isDead = (boid->entity.flags & FLAG_DEAD);
+        bool isSpawning = (boid->entity.flags & FLAG_SPAWNING);
+        bool isEaten = !isSpawning && !isDead && CheckCollisionCircles(boid->entity.position, BOID_RADIUS, hitboxPosition, SNAKE_HITBOX_RADIUS);
 
         if (isEaten) {
-            boid->flags |= FLAG_DEAD;
+            boid->entity.flags |= FLAG_DEAD;
             boidsEaten += 1;
         }
     }
@@ -609,8 +788,14 @@ void snakeEat(Snake* snake, Array* boids, float delta) {
         snake->comboLevel = 0.0;
         snake->comboHealth = 1.0;
     }
-}
 
+    for ITERATE(i, boidBombs->used) {
+        BoidBomb* boidBomb = aGet(boidBombs, i);
+        if (boidBomb->entity.flags & FLAG_DROPPED) continue;
+        if (!CheckCollisionCircles(hitboxPosition, SNAKE_HITBOX_RADIUS, boidBomb->entity.position, getBoidBombRadius(boidBomb->boidCount))) continue;
+        popBoidBomb(boidBomb, world);
+    }
+}
 
 
 
@@ -624,8 +809,10 @@ void snakeEat(Snake* snake, Array* boids, float delta) {
 void initWorld(World* world, Rectangle bounds, float waterLine)
 {
     world->boids = aCreate(128, sizeof(Boid));
+    world->boidBombs = aCreate(8, sizeof(BoidBomb));
     initBoidMap(&world->boidMap, Vector2Ceil(Vector2Divide(RectangleSize(bounds), CHUNK_SIZE)));
-    world->snake.position = RectangleCenter(bounds);
+    world->snake.entity.position = RectangleCenter(bounds);
+    world->snake.entity.velocity = Vector2Zero();
     world->snake.boostPercent = 0.0;
     world->snake.boostColdownTimer = 0.0;
     world->snake.score = 0.0;
@@ -651,7 +838,7 @@ void cleanWorld(World* world)
 // ..Main
 ////////////////////////////////////////////
 
-
+#define WATER_LINE 200.0
 
 //------------------------------------------------------------------------------------
 // Program main entry point
@@ -661,8 +848,10 @@ int main(void) {
     //--------------------------------------------------------------------------------------
     Vector2 screenSize = (Vector2){800, 800};
 
+    
+
     World currentWorld;
-    initWorld(&currentWorld, RectangleFromSize(screenSize), 200.0);
+    initWorld(&currentWorld, RectangleFromSize(screenSize), WATER_LINE);
 
     Array waves = aCreate(2, sizeof(WaterWave));
     {
@@ -675,6 +864,8 @@ int main(void) {
 
     InitWindow(screenSize.x, screenSize.y, "raylib [core] example - basic window");
 
+    loadSprites();
+
     SetTargetFPS(60);               // Set our game to run at 60 frames-per-second
     //--------------------------------------------------------------------------------------
 
@@ -686,25 +877,36 @@ int main(void) {
         //----------------------------------------------------------------------------------
         
         if (IsMouseButtonPressed(MOUSE_BUTTON_LEFT)) {
-            Vector2 spawnSize = (Vector2){20, 20};
-            Vector2 spawnTopLeft = Vector2Subtract(GetMousePosition(), Vector2Scale(spawnSize, 0.5));
-            for ITERATE(x, spawnSize.x)
-            for ITERATE(y, spawnSize.y) {
-                spawnBoid(&currentWorld, Vector2Add(spawnTopLeft, (Vector2){x, y}));
-            }
-            
+            boidExplosiveSpawn(&currentWorld, GetMousePosition(), 400);
         }
         
+        currentWorld.boidBombSpawnTime -= FIXED_DELTA;
+        if (currentWorld.boidBombSpawnTime <= 0.0) {
+            currentWorld.boidBombSpawnTime = Lerp(5.0, 10.0, RandFloat());
+            bool spawnOnLeft = RandBool();
+            spawnBoidBomb(
+                &currentWorld, 
+                (Vector2) {spawnOnLeft ? -40 : currentWorld.bounds.width + 40, Lerp(40, WATER_LINE - 40, RandFloat())}, 
+                (Vector2) {(spawnOnLeft ? 1 : -1) * Lerp(40, 60, RandFloat()), 0},
+                Lerp(200, 800, RandFloat())
+            );
+        }
 
-        clearDeadBoids(&currentWorld.boids);
+        clearDeadEntities(&currentWorld.boids);
+        clearDeadEntities(&currentWorld.boidBombs);
+
         clearBoidMap(&currentWorld.boidMap);
         populateBoidMap(&currentWorld.boidMap, &currentWorld.boids);
-        boidsReact(&currentWorld.boids, &currentWorld.boidMap, currentWorld.water.bounds, currentWorld.snake.position, FIXED_DELTA);
-        boidsMove(&currentWorld.boids, currentWorld.water.bounds, FIXED_DELTA);
+        boidsReact(&currentWorld.boids, &currentWorld.boidMap, &currentWorld.water, currentWorld.water.bounds, currentWorld.snake.entity.position, FIXED_DELTA);
+        boidsMove(&currentWorld.boids, &currentWorld.water, currentWorld.bounds, currentWorld.water.bounds, FIXED_DELTA);
+
+
+        boidBombsMove(&currentWorld.boidBombs, currentWorld.bounds, FIXED_DELTA);
+        
 
         snakeUpdate(&currentWorld.snake, &currentWorld.water, FIXED_DELTA);
         snakeMove(&currentWorld.snake, currentWorld.bounds, &currentWorld.water, FIXED_DELTA);
-        snakeEat(&currentWorld.snake, &currentWorld.boids, FIXED_DELTA);
+        snakeEat(&currentWorld.snake, &currentWorld, &currentWorld.boids, &currentWorld.boidBombs, FIXED_DELTA);
 
         waterBodyUpdate(&currentWorld.water, FIXED_DELTA);
         waterBodyMove(&currentWorld.water, &waves, fixedTime, FIXED_DELTA);
@@ -716,8 +918,10 @@ int main(void) {
             ClearBackground(BLACK);
 
             boidsRender(&currentWorld.boids);
-            snakeRender(&currentWorld.snake);
             waterBodyRender(&currentWorld.water);
+            boidBombsRender(&currentWorld.boidBombs);
+            snakeRender(&currentWorld.snake);
+            
 
             char str[8];
             sprintf(str, "%d", (int) floor(currentWorld.snake.score));
@@ -726,6 +930,8 @@ int main(void) {
             DrawText(str, screenSize.x / 2, 40, 20, WHITE);
             sprintf(str, "%d%",  (int) (currentWorld.snake.comboHealth * 100));
             DrawText(str, screenSize.x / 2, 60, 20, WHITE);
+
+            DrawTexture(PLANE_SPRITE, 20, 20, WHITE);
             //DrawText("Congrats! You created your first window!", 190, 200, 20, LIGHTGRAY);
             DrawFPS(10, 10);
         EndDrawing();
