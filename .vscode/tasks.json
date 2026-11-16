@@ -123,6 +123,23 @@
             "problemMatcher": ["$gcc"]
         },
         {
+            "label": "WEB-build",
+            "type": "shell",
+            "command": "./build_web.sh",
+            "options": { "cwd": "${workspaceFolder}" },
+            "group": "build",
+            "problemMatcher": ["$gcc"]
+        },
+        {
+            "label": "WEB-serve",
+            "detail": "Build for web, then serve on http://localhost:8080",
+            "type": "shell",
+            "command": "./build_web.sh serve",
+            "options": { "cwd": "${workspaceFolder}" },
+            "isBackground": false,
+            "problemMatcher": ["$gcc"]
+        },
+        {
             "label": "LINUX-RELEASE-build",
             "type": "shell",
             "command": "mkdir -p build/release && gcc -std=c17 -O3 -ffast-math src/*.c -o build/release/game -I./src -I./src/include $(pkg-config --cflags --libs raylib) -lm",

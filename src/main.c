@@ -6,6 +6,9 @@
 #include "array.h"
 #include "hash_table.h"
 #include "raymath.h"
+#if defined(PLATFORM_WEB)
+    #include <emscripten/emscripten.h>
+#endif
 
 //#define _CRT_SECURE_NO_WARNINGS
 
@@ -18,10 +21,10 @@
 #endif
 
 
-#if defined(PLATFORM_DESKTOP)
-    #define GLSL_VERSION            330
-#else   // PLATFORM_ANDROID, PLATFORM_WEB
-    #define GLSL_VERSION            100
+#if defined(PLATFORM_WEB) || defined(PLATFORM_ANDROID)
+    #define GLSL_VERSION            100     // OpenGL ES 2.0 / WebGL 1
+#else
+    #define GLSL_VERSION            330     // desktop OpenGL 3.3
 #endif
 
 
@@ -157,7 +160,7 @@ Color COLOR_BG = BLACK;
 Color COLOR_HIGHLIGHT = RED;
 
 // Blend Color
-Color ColorLerp(Color c1, Color c2, float amount) {
+Color ColorBlend(Color c1, Color c2, float amount) {
     return (Color) {
         Lerp(c1.r, c2.r, amount),
         Lerp(c1.g, c2.g, amount),
@@ -440,7 +443,7 @@ GLSLColor glslColor(Color color) {
 Shader MASK_SHADER;
 
 void loadShaders() {
-    MASK_SHADER           = LoadShader(0, TextFormat("assets/shaders/mask.fs", GLSL_VERSION));
+    MASK_SHADER           = LoadShader(0, TextFormat("assets/shaders/glsl%i/mask.fs", GLSL_VERSION));
 }
 
 
@@ -1185,7 +1188,7 @@ void snakeMove(Snake* snake, Rectangle bounds, Array* splashParticles, WaterBody
 
 void snakeRender(Snake* snake, float time) {
 
-    Color bodyColor = (snake->entity.flags & FLAG_CAN_DASH) ? COLOR_MAIN : ColorLerp(COLOR_MAIN, COLOR_BG, 0.1);
+    Color bodyColor = (snake->entity.flags & FLAG_CAN_DASH) ? COLOR_MAIN : ColorBlend(COLOR_MAIN, COLOR_BG, 0.1);
 
     for ITERATE(i, snake->nodes.used - 1) {
         SnakeNode* snakeNode = aGet(&snake->nodes, i + 1);
@@ -1307,29 +1310,204 @@ void cleanWorld(World* world)
 
 #define WATER_LINE 225.0
 
+// Game state lives at file scope so the per-frame function can be driven
+// either by a native loop or by the browser (emscripten_set_main_loop).
+static const Vector2 screenSize = {800, 800};
+static World currentWorld;
+static Array waves; // WaterWave
+static float fixedTime = 0.0;
+static Color COLOR_DARK;
+static Color COLOR_LIGHT;
+static Vector2 comboTextureSize;
+static RenderTexture2D comboTexture;
+
+//------------------------------------------------------------------------------------
+// One update + draw step
+//------------------------------------------------------------------------------------
+static void updateDrawFrame(void) {
+    // Update
+    //----------------------------------------------------------------------------------
+    // TODO: Update your variables here
+    //----------------------------------------------------------------------------------
+
+    // if (IsKeyPressed(KEY_ENTER)) {
+    //     shakeStrength = 100.0f;
+    // }
+
+    COLOR_BG = (currentWorld.snake.comboLevel >= 10) ? COLOR_LIGHT : COLOR_DARK;
+    COLOR_MAIN = (currentWorld.snake.comboLevel >= 10) ? COLOR_DARK : COLOR_LIGHT;
+
+    shakeStrength = Lerp(shakeStrength, 0.0, FIXED_DELTA * 5);
+    shakeOffset = (Vector2){ RandRange(-shakeStrength, shakeStrength), RandRange(-shakeStrength, shakeStrength)};
+    
+    camera.target = (Vector2){RandRange(-shakeStrength, shakeStrength), RandRange(-shakeStrength, shakeStrength)};
+
+    comboFlashPercentage = Lerp(comboFlashPercentage, 0.0, FIXED_DELTA * 5);
+    //printf("%f\n", camera.target.x);
+
+    // if (IsMouseButtonPressed(MOUSE_BUTTON_LEFT)) {
+    //     boidExplosiveSpawn(&currentWorld, GetMousePosition(), 400);
+    // }
+    
+    if (gameHasStarted) {
+        currentWorld.boidBombSpawnTime -= FIXED_DELTA;
+        if (currentWorld.boidBombSpawnTime <= 0.0) {
+            currentWorld.boidBombSpawnTime = RandRange(5.0, 8.0);
+
+            if (currentWorld.boids.used < 2000) {
+                bool spawnOnLeft = RandBool();
+                spawnBoidBomb(
+                    &currentWorld, 
+                    (Vector2) {spawnOnLeft ? -40 : currentWorld.bounds.width + 40, Lerp(40, WATER_LINE - 40, RandFloat())}, 
+                    (Vector2) {(spawnOnLeft ? 1 : -1) * Lerp(40, 60, RandFloat()), 0},
+                    fixedTime,
+                    Lerp(200, 800, RandFloat())
+                );
+            }
+        }
+    }
+
+    clearDeadEntities(&currentWorld.boids);
+    clearDeadEntities(&currentWorld.boidBombs);
+    clearDeadEntities(&currentWorld.splashParticles);
+    clearDeadEntities(&currentWorld.bloodParticles);
+
+    populateBoidMap(&currentWorld.boidMap, &currentWorld.boids);
+    boidsReact(&currentWorld.boids, &currentWorld.boidMap, &currentWorld.water, currentWorld.water.bounds, currentWorld.snake.entity.position, FIXED_DELTA);
+    boidsMove(&currentWorld.boids, &currentWorld.water, currentWorld.bounds, currentWorld.water.bounds, FIXED_DELTA);
+   
+
+
+    boidBombsMove(&currentWorld.boidBombs, currentWorld.bounds, FIXED_DELTA);
+    
+
+    snakeUpdate(&currentWorld.snake, &currentWorld.water, FIXED_DELTA);
+    snakeMove(&currentWorld.snake, currentWorld.bounds, &currentWorld.splashParticles, &currentWorld.water, fixedTime, FIXED_DELTA);
+    snakeEat(&currentWorld.snake, &currentWorld, &currentWorld.boids, &currentWorld.boidBombs, &currentWorld.bloodParticles, fixedTime, FIXED_DELTA);
+
+    waterBodyUpdate(&currentWorld.water, FIXED_DELTA);
+    waterBodyMove(&currentWorld.water, &waves, fixedTime, FIXED_DELTA);
+
+    splashParticlesMove(&currentWorld.splashParticles, &currentWorld.water, FIXED_DELTA);
+    bloodParticlesMove(&currentWorld.bloodParticles, &currentWorld.water, FIXED_DELTA);
+    
+    // Draw
+    //----------------------------------------------------------------------------------
+    BeginDrawing(); {
+        
+        ClearBackground(COLOR_BG);
+
+        
+
+        BeginMode2D(camera); 
+            char str[80];
+
+            if (gameHasStarted) {
+                int comboBonus = (int) getComboBonus(currentWorld.snake.comboLevel);
+                sprintf(str, "x%d", (int) getComboBonus(currentWorld.snake.comboLevel));
+                Vector2 drawPosition = RectangleCenter(currentWorld.water.bounds);
+                drawPosition.y += 60;
+
+                float cutoff = currentWorld.snake.comboLevel - floor(currentWorld.snake.comboLevel);
+                float colorBonus = currentWorld.snake.comboHealth;
+                EndMode2D();
+                BeginTextureMode(comboTexture); {
+                    Vector2 scale = getSquashScale((1.0 - comboFlashPercentage) * 0.5, 1.05);
+
+                    ClearBackground((Color){0});
+                    Vector2 textSize = DrawTextAnchored( Vector2Scale(comboTextureSize, 0.5), (Vector2){0.5, 0.5}, MAIN_FONT, str, 200 * scale.x, 0.0, WHITE);
+                    float half = (1.0 - (textSize.y / comboTextureSize.y)) / 2.0;
+                    cutoff = Remap(cutoff, 0.0, 1.0, half + 0.1, 1.0 - half - 0.15);
+                } EndTextureMode();
+                BeginMode2D(camera); 
+                
+                BeginShaderMode(MASK_SHADER); {
+                    //DrawTexture(comboTexture.texture, 50, 50, WHITE);
+                    
+                    
+
+                    SetShaderValue(MASK_SHADER, GetShaderLocation(MASK_SHADER, "cutoff"), &cutoff, SHADER_UNIFORM_FLOAT);
+                    
+
+                    GLSLColor color2 = glslColor(ColorBlend(ColorBlend(COLOR_BG, COLOR_MAIN, 0.1 + colorBonus * 0.1), COLOR_MAIN, comboFlashPercentage));
+                    GLSLColor color1 = glslColor(ColorBlend(ColorBlend(COLOR_BG, COLOR_MAIN, 0.2 + colorBonus * 0.1), COLOR_MAIN, comboFlashPercentage));
+
+
+
+                    color1.a = Lerp(0.1, 1.0, currentWorld.snake.comboHealth);
+                    color2.a = color1.a;
+                    SetShaderValue(MASK_SHADER, GetShaderLocation(MASK_SHADER, "col1"), &color1, SHADER_UNIFORM_VEC4);
+                    SetShaderValue(MASK_SHADER, GetShaderLocation(MASK_SHADER, "col2"), &color2, SHADER_UNIFORM_VEC4);
+
+                    
+
+                    DrawTextureRec(comboTexture.texture, (Rectangle){ 0, 0, comboTexture.texture.width, -comboTexture.texture.height}, Vector2Add(Vector2Subtract(drawPosition, Vector2Multiply(comboTextureSize, (Vector2){0.5, 1.0})), ((Vector2){0, 40})), WHITE);
+                    // DrawTexturePro(comboTexture.texture, (Rectangle){ 0, 0, comboTexture.texture.width, -comboTexture.texture.height}, 
+                    // (Rectangle){ drawPosition.x - comboTexture.texture.width / 2, drawPosition.y - comboTexture.texture.height / 2, comboTexture.texture.width, -comboTexture.texture.height}, 
+                    // Vector2Zero(), 0, WHITE);
+                } EndShaderMode();
+
+                sprintf(str, "%d", (int) floor(currentWorld.snake.score));
+                DrawTextAnchored(drawPosition, (Vector2){0.5, 0.0}, MAIN_FONT, str, 50, 0.0, ColorBlend(COLOR_BG, COLOR_MAIN, 0.1));
+            } else {
+                Vector2 drawPosition = RectangleCenter(currentWorld.water.bounds);
+                DrawTextAnchored(drawPosition, (Vector2){0.5, 1.0}, MAIN_FONT, "[WASD] to Move.", 50, 0.0, ColorBlend(COLOR_BG, COLOR_MAIN, 0.3));
+                DrawTextAnchored(drawPosition, (Vector2){0.5, 0.0}, MAIN_FONT, "[Space] to Dash.", 50, 0.0, ColorBlend(COLOR_BG, COLOR_MAIN, 0.3));
+            }
+            
+
+            bloodParticlesRender(&currentWorld.bloodParticles);
+            boidsRender(&currentWorld.boids);
+            waterBodyRender(&currentWorld.water);
+            boidBombsRender(&currentWorld.boidBombs, fixedTime);
+            snakeRender(&currentWorld.snake, fixedTime);
+            splashParticlesRender(&currentWorld.splashParticles);
+            
+        EndMode2D();
+    } EndDrawing();
+    //----------------------------------------------------------------------------------
+
+    fixedTime += FIXED_DELTA;
+}
+
 //------------------------------------------------------------------------------------
 // Program main entry point
 //------------------------------------------------------------------------------------
+#if defined(PLATFORM_WEB)
+// The browser calls this once per display refresh (60, 120, 144 Hz...).
+// The game advances a fixed FIXED_DELTA per frame, so only step when 1/60 s has
+// passed; otherwise high-refresh monitors would run the game too fast.
+static void webFrame(void) {
+    static double last = 0.0;
+    static double accumulator = 0.0;
+    double now = emscripten_get_now() / 1000.0;
+    if (last == 0.0) last = now - FIXED_DELTA;
+    accumulator += now - last;
+    last = now;
+    if (accumulator > 0.25) accumulator = 0.25;      // tab was in the background: don't fast-forward
+    if (accumulator < FIXED_DELTA - 0.002) return;   // 2 ms slack for refresh-timing jitter
+    accumulator -= FIXED_DELTA;
+    if (accumulator < 0.0) accumulator = 0.0;
+    updateDrawFrame();
+}
+#endif
+
 int main(void) {
     // Initialization
     //--------------------------------------------------------------------------------------
-    Vector2 screenSize = (Vector2){800, 800};
-
-    
-    World currentWorld;
     initWorld(&currentWorld, RectangleFromSize(screenSize), WATER_LINE);
 
-    Array waves = aCreate(2, sizeof(WaterWave));
+    waves = aCreate(2, sizeof(WaterWave));
     {
         WaterWave wave;
         wave = (WaterWave){1.0, 200.0, 2.0, 0.0}; aAppend(&waves, &wave);
         wave = (WaterWave){1.0, 73.0, -3, 0.3}; aAppend(&waves, &wave);
         wave = (WaterWave){0.5, 13.0, 4, -0.3}; aAppend(&waves, &wave);
     }
-    float fixedTime = 0.0;
+    fixedTime = 0.0;
 
-    Color COLOR_DARK = GetColor(0x171738FF);
-    Color COLOR_LIGHT = GetColor(0xC1DBE3FF);
+    COLOR_DARK = GetColor(0x171738FF);
+    COLOR_LIGHT = GetColor(0xC1DBE3FF);
 
     
     COLOR_HIGHLIGHT = GetColor(0xBC4B51FF);
@@ -1353,159 +1531,21 @@ int main(void) {
 
     cameraCenter = Vector2Scale(screenSize, 0.5);
 
-    Vector2 comboTextureSize = (Vector2){screenSize.x, 300};
-    RenderTexture2D comboTexture = LoadRenderTexture(comboTextureSize.x, comboTextureSize.y);
+    comboTextureSize = (Vector2){screenSize.x, 300};
+    comboTexture = LoadRenderTexture(comboTextureSize.x, comboTextureSize.y);
     
 
-    SetTargetFPS(60);               // Set our game to run at 60 frames-per-second
     //--------------------------------------------------------------------------------------
 
-    // Main game loop
-    while (!WindowShouldClose()) {   // Detect window close button or ESC key
-        // Update
-        //----------------------------------------------------------------------------------
-        // TODO: Update your variables here
-        //----------------------------------------------------------------------------------
-
-        // if (IsKeyPressed(KEY_ENTER)) {
-        //     shakeStrength = 100.0f;
-        // }
-
-        COLOR_BG = (currentWorld.snake.comboLevel >= 10) ? COLOR_LIGHT : COLOR_DARK;
-        COLOR_MAIN = (currentWorld.snake.comboLevel >= 10) ? COLOR_DARK : COLOR_LIGHT;
-
-        shakeStrength = Lerp(shakeStrength, 0.0, FIXED_DELTA * 5);
-        shakeOffset = (Vector2){ RandRange(-shakeStrength, shakeStrength), RandRange(-shakeStrength, shakeStrength)};
-        
-        camera.target = (Vector2){RandRange(-shakeStrength, shakeStrength), RandRange(-shakeStrength, shakeStrength)};
-
-        comboFlashPercentage = Lerp(comboFlashPercentage, 0.0, FIXED_DELTA * 5);
-        //printf("%f\n", camera.target.x);
-
-        // if (IsMouseButtonPressed(MOUSE_BUTTON_LEFT)) {
-        //     boidExplosiveSpawn(&currentWorld, GetMousePosition(), 400);
-        // }
-        
-        if (gameHasStarted) {
-            currentWorld.boidBombSpawnTime -= FIXED_DELTA;
-            if (currentWorld.boidBombSpawnTime <= 0.0) {
-                currentWorld.boidBombSpawnTime = RandRange(5.0, 8.0);
-
-                if (currentWorld.boids.used < 2000) {
-                    bool spawnOnLeft = RandBool();
-                    spawnBoidBomb(
-                        &currentWorld, 
-                        (Vector2) {spawnOnLeft ? -40 : currentWorld.bounds.width + 40, Lerp(40, WATER_LINE - 40, RandFloat())}, 
-                        (Vector2) {(spawnOnLeft ? 1 : -1) * Lerp(40, 60, RandFloat()), 0},
-                        fixedTime,
-                        Lerp(200, 800, RandFloat())
-                    );
-                }
-            }
-        }
-
-        clearDeadEntities(&currentWorld.boids);
-        clearDeadEntities(&currentWorld.boidBombs);
-        clearDeadEntities(&currentWorld.splashParticles);
-        clearDeadEntities(&currentWorld.bloodParticles);
-
-        populateBoidMap(&currentWorld.boidMap, &currentWorld.boids);
-        boidsReact(&currentWorld.boids, &currentWorld.boidMap, &currentWorld.water, currentWorld.water.bounds, currentWorld.snake.entity.position, FIXED_DELTA);
-        boidsMove(&currentWorld.boids, &currentWorld.water, currentWorld.bounds, currentWorld.water.bounds, FIXED_DELTA);
-       
-
-
-        boidBombsMove(&currentWorld.boidBombs, currentWorld.bounds, FIXED_DELTA);
-        
-
-        snakeUpdate(&currentWorld.snake, &currentWorld.water, FIXED_DELTA);
-        snakeMove(&currentWorld.snake, currentWorld.bounds, &currentWorld.splashParticles, &currentWorld.water, fixedTime, FIXED_DELTA);
-        snakeEat(&currentWorld.snake, &currentWorld, &currentWorld.boids, &currentWorld.boidBombs, &currentWorld.bloodParticles, fixedTime, FIXED_DELTA);
-
-        waterBodyUpdate(&currentWorld.water, FIXED_DELTA);
-        waterBodyMove(&currentWorld.water, &waves, fixedTime, FIXED_DELTA);
-
-        splashParticlesMove(&currentWorld.splashParticles, &currentWorld.water, FIXED_DELTA);
-        bloodParticlesMove(&currentWorld.bloodParticles, &currentWorld.water, FIXED_DELTA);
-        
-        // Draw
-        //----------------------------------------------------------------------------------
-        BeginDrawing(); {
-            
-            ClearBackground(COLOR_BG);
-
-            
-
-            BeginMode2D(camera); 
-                char str[80];
-
-                if (gameHasStarted) {
-                    int comboBonus = (int) getComboBonus(currentWorld.snake.comboLevel);
-                    sprintf(str, "x%d", (int) getComboBonus(currentWorld.snake.comboLevel));
-                    Vector2 drawPosition = RectangleCenter(currentWorld.water.bounds);
-                    drawPosition.y += 60;
-
-                    float cutoff = currentWorld.snake.comboLevel - floor(currentWorld.snake.comboLevel);
-                    float colorBonus = currentWorld.snake.comboHealth;
-                    EndMode2D();
-                    BeginTextureMode(comboTexture); {
-                        Vector2 scale = getSquashScale((1.0 - comboFlashPercentage) * 0.5, 1.05);
-
-                        ClearBackground((Color){0});
-                        Vector2 textSize = DrawTextAnchored( Vector2Scale(comboTextureSize, 0.5), (Vector2){0.5, 0.5}, MAIN_FONT, str, 200 * scale.x, 0.0, WHITE);
-                        float half = (1.0 - (textSize.y / comboTextureSize.y)) / 2.0;
-                        cutoff = Remap(cutoff, 0.0, 1.0, half + 0.1, 1.0 - half - 0.15);
-                    } EndTextureMode();
-                    BeginMode2D(camera); 
-                    
-                    BeginShaderMode(MASK_SHADER); {
-                        //DrawTexture(comboTexture.texture, 50, 50, WHITE);
-                        
-                        
-
-                        SetShaderValue(MASK_SHADER, GetShaderLocation(MASK_SHADER, "cutoff"), &cutoff, SHADER_UNIFORM_FLOAT);
-                        
-
-                        GLSLColor color2 = glslColor(ColorLerp(ColorLerp(COLOR_BG, COLOR_MAIN, 0.1 + colorBonus * 0.1), COLOR_MAIN, comboFlashPercentage));
-                        GLSLColor color1 = glslColor(ColorLerp(ColorLerp(COLOR_BG, COLOR_MAIN, 0.2 + colorBonus * 0.1), COLOR_MAIN, comboFlashPercentage));
-
-    
-
-                        color1.a = Lerp(0.1, 1.0, currentWorld.snake.comboHealth);
-                        color2.a = color1.a;
-                        SetShaderValue(MASK_SHADER, GetShaderLocation(MASK_SHADER, "col1"), &color1, SHADER_UNIFORM_VEC4);
-                        SetShaderValue(MASK_SHADER, GetShaderLocation(MASK_SHADER, "col2"), &color2, SHADER_UNIFORM_VEC4);
-
-                        
-
-                        DrawTextureRec(comboTexture.texture, (Rectangle){ 0, 0, comboTexture.texture.width, -comboTexture.texture.height}, Vector2Add(Vector2Subtract(drawPosition, Vector2Multiply(comboTextureSize, (Vector2){0.5, 1.0})), ((Vector2){0, 40})), WHITE);
-                        // DrawTexturePro(comboTexture.texture, (Rectangle){ 0, 0, comboTexture.texture.width, -comboTexture.texture.height}, 
-                        // (Rectangle){ drawPosition.x - comboTexture.texture.width / 2, drawPosition.y - comboTexture.texture.height / 2, comboTexture.texture.width, -comboTexture.texture.height}, 
-                        // Vector2Zero(), 0, WHITE);
-                    } EndShaderMode();
-
-                    sprintf(str, "%d", (int) floor(currentWorld.snake.score));
-                    DrawTextAnchored(drawPosition, (Vector2){0.5, 0.0}, MAIN_FONT, str, 50, 0.0, ColorLerp(COLOR_BG, COLOR_MAIN, 0.1));
-                } else {
-                    Vector2 drawPosition = RectangleCenter(currentWorld.water.bounds);
-                    DrawTextAnchored(drawPosition, (Vector2){0.5, 1.0}, MAIN_FONT, "[WASD] to Move.", 50, 0.0, ColorLerp(COLOR_BG, COLOR_MAIN, 0.3));
-                    DrawTextAnchored(drawPosition, (Vector2){0.5, 0.0}, MAIN_FONT, "[Space] to Dash.", 50, 0.0, ColorLerp(COLOR_BG, COLOR_MAIN, 0.3));
-                }
-                
-
-                bloodParticlesRender(&currentWorld.bloodParticles);
-                boidsRender(&currentWorld.boids);
-                waterBodyRender(&currentWorld.water);
-                boidBombsRender(&currentWorld.boidBombs, fixedTime);
-                snakeRender(&currentWorld.snake, fixedTime);
-                splashParticlesRender(&currentWorld.splashParticles);
-                
-            EndMode2D();
-        } EndDrawing();
-        //----------------------------------------------------------------------------------
-
-        fixedTime += FIXED_DELTA;
+#if defined(PLATFORM_WEB)
+    // The browser drives the loop via requestAnimationFrame; this call does not return.
+    emscripten_set_main_loop(webFrame, 0, 1);
+#else
+    SetTargetFPS(60);               // Set our game to run at 60 frames-per-second
+    while (!WindowShouldClose()) {  // Detect window close button or ESC key
+        updateDrawFrame();
     }
+#endif
 
     // De-Initialization
     //--------------------------------------------------------------------------------------

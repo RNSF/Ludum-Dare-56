@@ -1,0 +1,91 @@
+<!doctype html>
+<html lang="en">
+<head>
+    <meta charset="utf-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1">
+    <title>NOM</title>
+    <style>
+        html, body {
+            margin: 0;
+            height: 100%;
+            overflow: hidden;
+            background: #171738;
+            color: #C1DBE3;
+            font-family: system-ui, sans-serif;
+        }
+        body {
+            display: flex;
+            align-items: center;
+            justify-content: center;
+        }
+        #stage {
+            position: relative;
+            /* the game renders at 800x800; scale down to fit small windows, never up */
+            width: min(800px, 100vw, 100vh);
+            aspect-ratio: 1;
+        }
+        canvas {
+            display: block;
+            width: 100%;
+            height: 100%;
+            outline: none;
+            image-rendering: auto;
+        }
+        #overlay {
+            position: absolute;
+            inset: 0;
+            display: flex;
+            align-items: center;
+            justify-content: center;
+            background: rgba(23, 23, 56, 0.85);
+            font-size: 28px;
+            cursor: pointer;
+            user-select: none;
+        }
+        #overlay.hidden { display: none; }
+    </style>
+</head>
+<body>
+    <div id="stage">
+        <canvas id="canvas" tabindex="-1" oncontextmenu="event.preventDefault()"></canvas>
+        <div id="overlay">Loading…</div>
+    </div>
+
+    <script>
+        var overlay = document.getElementById('overlay');
+        var canvas = document.getElementById('canvas');
+        var ready = false;
+
+        // Browsers keep audio muted until the player interacts with the page,
+        // so start with a click-to-play overlay (which also focuses the canvas for keyboard input).
+        overlay.addEventListener('click', function () {
+            if (!ready) return;
+            overlay.classList.add('hidden');
+            canvas.focus();
+        });
+
+        // Space and arrow keys would otherwise scroll the page.
+        window.addEventListener('keydown', function (e) {
+            if ([' ', 'ArrowUp', 'ArrowDown', 'ArrowLeft', 'ArrowRight'].indexOf(e.key) !== -1) e.preventDefault();
+        });
+
+        var Module = {
+            canvas: canvas,
+            print: function (text) { console.log(text); },
+            printErr: function (text) { console.warn(text); },
+            setStatus: function (text) {
+                if (!ready) overlay.textContent = text ? 'Loading…' : 'Click to play';
+            },
+            onRuntimeInitialized: function () {
+                ready = true;
+                overlay.textContent = 'Click to play';
+            },
+        };
+        window.onerror = function () {
+            overlay.classList.remove('hidden');
+            overlay.textContent = 'Something went wrong. See the browser console.';
+        };
+    </script>
+    {{{ SCRIPT }}}
+</body>
+</html>
