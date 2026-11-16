@@ -114,5 +114,21 @@
             "args": ["/C", "if not exist ${workspaceFolder}\\build\\release mkdir ${workspaceFolder}\\build\\release"],
             "group": "build"
         },
-    ]
+            {
+            "label": "LINUX-DEBUG-build",
+            "type": "shell",
+            "command": "mkdir -p build/debug && gcc -g -std=c17 -O0 -Wall -D_DEBUG src/*.c -o build/debug/game -I./src -I./src/include $(pkg-config --cflags --libs raylib) -lm",
+            "options": { "cwd": "${workspaceFolder}" },
+            "group": "build",
+            "problemMatcher": ["$gcc"]
+        },
+        {
+            "label": "LINUX-RELEASE-build",
+            "type": "shell",
+            "command": "mkdir -p build/release && gcc -std=c17 -O3 -ffast-math src/*.c -o build/release/game -I./src -I./src/include $(pkg-config --cflags --libs raylib) -lm",
+            "options": { "cwd": "${workspaceFolder}" },
+            "group": "build",
+            "problemMatcher": ["$gcc"]
+        },
+]
 }

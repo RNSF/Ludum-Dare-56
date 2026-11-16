@@ -63,15 +63,22 @@ typedef struct Boid {
     Entity entity;
 } Boid;
 
-typedef struct BoidMap {
-    Array chunks; //BoidChunk
-    Vector2 chunkCount;
-} BoidMap;
+// Uniform grid rebuilt every tick with a counting sort.
+// Boids are copied into `sorted` grouped by cell (row-major), so a horizontal run
+// of cells is one contiguous slice: sorted[cellStart[first] .. cellStart[last + 1]).
+typedef struct BoidGridEntry {
+    float x, y;   // position
+    float vx, vy; // velocity
+} BoidGridEntry;
 
-typedef struct BoidChunk {
-    Boid* boids[BOID_CHUNK_MAX];
-    int boidCount;
-} BoidChunk;
+typedef struct BoidMap {
+    int width, height;      // in cells
+    int* cellStart;         // width * height + 1 entries
+    int* cellFill;          // width * height entries, scratch for the sort
+    int* boidSlot;          // per boid: its index in `sorted`, -1 if not inserted
+    BoidGridEntry* sorted;
+    size_t capacity;        // capacity of boidCell / sorted
+} BoidMap;
 
 typedef struct SnakeNode {
     Vector2 position;
@@ -181,6 +188,8 @@ Vector2 Vector2Ceil(Vector2 v1) {
     return (Vector2){ceil(v1.x), ceil(v1.y)};
 }
 
+// raylib 6+ raymath.h already provides these
+#if RAYLIB_VERSION_MAJOR < 6
 Vector2 Vector2Max(Vector2 v1, Vector2 v2) {
     return (Vector2){fmax(v1.x, v2.x), fmax(v1.y, v2.y)};
 }
@@ -188,6 +197,7 @@ Vector2 Vector2Max(Vector2 v1, Vector2 v2) {
 Vector2 Vector2Min(Vector2 v1, Vector2 v2) {
     return (Vector2){fmin(v1.x, v2.x), fmin(v1.y, v2.y)};
 }
+#endif
 
 Vector2 Vector2Side(float l) {
     return (Vector2){l, l};
@@ -661,78 +671,22 @@ void bloodParticlesRender(Array* bloodParticles) {
 
 
 void initBoidMap(BoidMap* boidMap, Vector2 chunkCount) {
-    boidMap->chunkCount = chunkCount;
-    boidMap->chunks = aCreate(chunkCount.x * chunkCount.y, sizeof(BoidChunk));
-    boidMap->chunks.used = boidMap->chunks.size;
+    boidMap->width = (int)chunkCount.x;
+    boidMap->height = (int)chunkCount.y;
+    int cells = boidMap->width * boidMap->height;
+    boidMap->cellStart = calloc(cells + 1, sizeof(int));
+    boidMap->cellFill = calloc(cells, sizeof(int));
+    boidMap->boidSlot = NULL;
+    boidMap->sorted = NULL;
+    boidMap->capacity = 0;
 }
 
 void cleanBoidMap(BoidMap* boidMap) {
-    aFree(&boidMap->chunks);
-}
-
-
-Vector2 getChunkPosition(Vector2 position) {
-    return Vector2Floor(Vector2Divide(position, CHUNK_SIZE));
-}
-
-Vector2 getTopLeftOfChunk(Vector2 chunkPosition) {
-    return Vector2Multiply(chunkPosition, CHUNK_SIZE);
-}
-
-Vector2 getCenterOfChunk(Vector2 chunkPosition) {
-    return Vector2Multiply(Vector2Add(chunkPosition, (Vector2){0.5, 0.5}), CHUNK_SIZE);
-}
-
-
-BoidChunk* getChunk(BoidMap* boidMap, Vector2 chunkPosition) {
-    assert(chunkPosition.x == round(chunkPosition.x) && chunkPosition.y == round(chunkPosition.y));
-
-    bool hasChunk = CheckCollisionPointRec(chunkPosition, RectangleFromSize(boidMap->chunkCount));
-    if (!hasChunk)
-        return NULL;
-
-    unsigned int chunkId = chunkPosition.x + chunkPosition.y * boidMap->chunkCount.x;
-    BoidChunk* boidChunk = aGet(&boidMap->chunks, chunkId);
-    return boidChunk;
-}
-
-void getBoidsIn(BoidMap* boidMap, Vector2 position, float radius, Array* output) {
-    assert(output->elementSize == sizeof(Boid*));
-
-    Vector2 minChunk = Vector2Max(Vector2Zero(),        Vector2Floor(Vector2Divide(Vector2Add(position, Vector2Side(-radius)), CHUNK_SIZE)));
-    Vector2 maxChunk = Vector2Min(boidMap->chunkCount,  Vector2Ceil (Vector2Divide(Vector2Add(position, Vector2Side(+radius)), CHUNK_SIZE)));
-    
-    Vector2 chunkPosition;
-    for (chunkPosition.y = minChunk.y; chunkPosition.y < maxChunk.y; chunkPosition.y++)
-    for (chunkPosition.x = minChunk.x; chunkPosition.x < maxChunk.x; chunkPosition.x++) {
-        BoidChunk* chunk = getChunk(boidMap, chunkPosition);
-        assert(chunk);
-        
-        Vector2 displacement = Vector2Subtract(getCenterOfChunk(chunkPosition), position);
-       
-        Vector2 closeSide = (Vector2){displacement.x < 0, displacement.y < 0};
-        Vector2 closestPositionInChunk = getTopLeftOfChunk(Vector2Add(chunkPosition, closeSide));
-        if (Vector2Distance(closestPositionInChunk, position) > radius) {
-            // can just ignore the whole chunk without checking distances of each boid
-            continue;
-        }
-
-        Vector2 farSide = (Vector2){displacement.x >= 0, displacement.y >= 0};
-        Vector2 furthestPositionInChunk = getTopLeftOfChunk(Vector2Add(chunkPosition, farSide));
-        if (Vector2Distance(furthestPositionInChunk, position) <= radius && chunk->boidCount) {
-            // can just append the whole chunk without checking distances of each boid
-            aAppendStaticArray(output, chunk->boids, chunk->boidCount); 
-            continue;
-        }
-
-        // append boid only if within radius
-        for ITERATE(i, chunk->boidCount) {
-            Boid* boid = chunk->boids[i];
-            if (Vector2Distance(boid->entity.position, position) <= radius) {
-                aAppend(output, &boid);
-            }
-        }
-    }
+    free(boidMap->cellStart);
+    free(boidMap->cellFill);
+    free(boidMap->boidSlot);
+    free(boidMap->sorted);
+    *boidMap = (BoidMap){0};
 }
 
 
@@ -758,32 +712,56 @@ void getBoidsIn(BoidMap* boidMap, Vector2 position, float radius, Array* output)
 
 
 
-void clearBoidMap(BoidMap* boidMap) {
-    for ITERATE(i, boidMap->chunks.used) {
-        BoidChunk* boidChunk = aGet(&boidMap->chunks, i);
-        boidChunk->boidCount = 0;
-    }
-}
-
-
-
 void populateBoidMap(BoidMap* boidMap, Array* boids) {
+    const int width = boidMap->width, height = boidMap->height, cells = width * height;
+    const float cellW = CHUNK_SIZE.x, cellH = CHUNK_SIZE.y;
+
+    if (boids->used > boidMap->capacity) {
+        boidMap->capacity = boids->used * 2;
+        boidMap->boidSlot = realloc(boidMap->boidSlot, boidMap->capacity * sizeof(int));
+        boidMap->sorted = realloc(boidMap->sorted, boidMap->capacity * sizeof(BoidGridEntry));
+    }
+
+    int* cellStart = boidMap->cellStart;
+    int* cellFill = boidMap->cellFill;
+    int* boidSlot = boidMap->boidSlot; // holds the cell until pass 3, then the slot
+    Boid* boidArray = boids->array;
+    memset(cellFill, 0, cells * sizeof(int));
+
+    // Pass 1: find each boid's cell and count per cell.
+    // Spawning boids are skipped by flocking anyway, and each cell keeps at most
+    // BOID_CHUNK_MAX boids (first come, first served), same as the old chunk map.
     for ITERATE(i, boids->used) {
-        Boid* boid = aGet(boids, i);
-        BoidChunk* boidChunk = getChunk(boidMap, getChunkPosition(boid->entity.position));
-        
-        if (!boidChunk) {
-           //  printf("Boid outside of world!");
-            return;
-        }
+        Entity* e = &boidArray[i].entity;
+        boidSlot[i] = -1;
+        if (e->flags & FLAG_SPAWNING) continue;
+        int cx = (int)floorf(e->position.x / cellW);
+        int cy = (int)floorf(e->position.y / cellH);
+        if (cx < 0 || cy < 0 || cx >= width || cy >= height) continue;
+        int cell = cx + cy * width;
+        if (cellFill[cell] >= BOID_CHUNK_MAX) continue;
+        cellFill[cell]++;
+        boidSlot[i] = cell;
+    }
 
-        if (boidChunk->boidCount >= BOID_CHUNK_MAX) {
-           //  printf("Boid chunk overflow!");;
-            return;
-        }
+    // Pass 2: prefix sum -> start offset of every cell.
+    int total = 0;
+    for (int c = 0; c < cells; c++) {
+        cellStart[c] = total;
+        total += cellFill[c];
+        cellFill[c] = cellStart[c]; // reuse as write cursor
+    }
+    cellStart[cells] = total;
 
-        boidChunk->boids[boidChunk->boidCount] = boid;
-        boidChunk->boidCount++;
+    // Pass 3: scatter a compact copy of each boid into its cell's slot.
+    BoidGridEntry* sorted = boidMap->sorted;
+    for ITERATE(i, boids->used) {
+        int cell = boidSlot[i];
+        if (cell < 0) continue;
+        Entity* e = &boidArray[i].entity;
+        int slot = cellFill[cell]++;
+        sorted[slot] = (BoidGridEntry){e->position.x, e->position.y, e->velocity.x, e->velocity.y};
+        boidSlot[i] = slot;
     }
 }
 
@@ -817,20 +795,21 @@ void boidExplosiveSpawn(World* world, Vector2 position, unsigned int countToSpaw
 
 
 void boidsReact(Array* boids, BoidMap* boidMap, WaterBody* water, Rectangle bounds, Vector2 pointToAvoid, float delta) {
+    const int width = boidMap->width, height = boidMap->height;
+    const int* cellStart = boidMap->cellStart;
+    BoidGridEntry* sorted = boidMap->sorted;
+    const int* boidSlot = boidMap->boidSlot;
+    const float cellW = CHUNK_SIZE.x, cellH = CHUNK_SIZE.y;
+    const float visionSqr = BOID_VISION_RADIUS * BOID_VISION_RADIUS;
+    const float separationSqr = BOID_SEPARATION_RADIUS * BOID_SEPARATION_RADIUS;
 
-    
-
-    Array flockBoids = aCreate(128, sizeof(Boid*));
     for ITERATE(i, boids->used) {
         Boid* boid = aGet(boids, i);
         if (!inWater(water, boid->entity.position)) {
             boid->entity.velocity.y += GRAVITY * delta;
+            if (boidSlot[i] >= 0) sorted[boidSlot[i]].vy = boid->entity.velocity.y;
             continue;
         }
-
-        flockBoids.used = 0;
-       
-        getBoidsIn(boidMap, boid->entity.position, BOID_VISION_RADIUS, &flockBoids);
 
         Vector2 separationForce = Vector2Zero();
         Vector2 alignmentForce  = Vector2Zero();
@@ -838,32 +817,48 @@ void boidsReact(Array* boids, BoidMap* boidMap, WaterBody* water, Rectangle boun
         Vector2 avoidanceForce  = Vector2Zero();
         Vector2 wallForce   = Vector2Zero();
 
-        
+        const float px = boid->entity.position.x, py = boid->entity.position.y;
 
-        if (flockBoids.used) {
-            unsigned int boidsUsed = 0;
+        int minX = (int)floorf((px - BOID_VISION_RADIUS) / cellW);
+        int maxX = (int)floorf((px + BOID_VISION_RADIUS) / cellW);
+        int minY = (int)floorf((py - BOID_VISION_RADIUS) / cellH);
+        int maxY = (int)floorf((py + BOID_VISION_RADIUS) / cellH);
+        if (minX < 0) minX = 0;
+        if (minY < 0) minY = 0;
+        if (maxX > width - 1)  maxX = width - 1;
+        if (maxY > height - 1) maxY = height - 1;
 
-            Vector2 totalDisplacement = Vector2Zero();
-            Vector2 totalVelocity = Vector2Zero();
-            Vector2 totalPosition = Vector2Zero();
+        unsigned int boidsUsed = 0;
+        float sepX = 0, sepY = 0;   // separation: steer to avoid crowding local flockmates
+        float velX = 0, velY = 0;   // alignment: steer towards the average heading of local flockmates
+        float posX = 0, posY = 0;   // cohesion: steer towards the center of mass of local flockmates
 
-            for ITERATE(j, flockBoids.used) {
-                Boid* flockBoid = *(Boid**) aGet(&flockBoids, j);
-                if (flockBoid->entity.flags & FLAG_SPAWNING) continue;
-
-                Vector2 displacement = Vector2Subtract(boid->entity.position, flockBoid->entity.position);
-                if (Vector2LengthSqr(displacement) <= BOID_SEPARATION_RADIUS * BOID_SEPARATION_RADIUS) 
-                    totalDisplacement = Vector2Add(totalDisplacement, displacement); // separation: s BOID_AVOIDANCE_RADIUS 40teer to avoid crowding local flockmates
-                totalVelocity = Vector2Add(totalVelocity, flockBoid->entity.velocity);      // alignment: steer towards the average heading of local flockmates
-                totalPosition = Vector2Add(totalPosition, flockBoid->entity.position);      // cohesion: steer to move towards the average position (center of mass) of local flockmates
-                boidsUsed++;
+        if (minX <= maxX) {
+            for (int cy = minY; cy <= maxY; cy++) {
+                // cells minX..maxX of this row are one contiguous slice
+                int from = cellStart[cy * width + minX];
+                int to   = cellStart[cy * width + maxX + 1];
+                for (int j = from; j < to; j++) {
+                    const BoidGridEntry* other = &sorted[j];
+                    float dx = px - other->x, dy = py - other->y;
+                    float distSqr = dx * dx + dy * dy;
+                    if (distSqr > visionSqr) continue;
+                    if (distSqr <= separationSqr) { sepX += dx; sepY += dy; }
+                    velX += other->vx; velY += other->vy;
+                    posX += other->x;  posY += other->y;
+                    boidsUsed++;
+                }
             }
+        }
 
-            if (boidsUsed) {
-                separationForce = Vector2Scale(totalDisplacement, BOID_SEPARATION_C);
-                alignmentForce  = Vector2Scale(totalVelocity  , BOID_ALIGNMENT_C / boidsUsed);
-                cohesionForce   = Vector2Scale(Vector2Subtract(Vector2Scale(totalPosition, 1.0 / boidsUsed), boid->entity.position), BOID_COHESION_C);
-            }
+        if (boidsUsed) {
+            float inv = 1.0f / boidsUsed;
+            separationForce = (Vector2){sepX * BOID_SEPARATION_C, sepY * BOID_SEPARATION_C};
+            // NOTE: integer division, kept on purpose to match the original tuning:
+            // alignment gets weaker in steps and switches off above BOID_ALIGNMENT_C neighbours.
+            float alignmentScale = (float)(BOID_ALIGNMENT_C / boidsUsed);
+            alignmentForce  = (Vector2){velX * alignmentScale, velY * alignmentScale};
+            cohesionForce   = (Vector2){(posX * inv - px) * BOID_COHESION_C, (posY * inv - py) * BOID_COHESION_C};
         }
         
         
@@ -884,10 +879,13 @@ void boidsReact(Array* boids, BoidMap* boidMap, WaterBody* water, Rectangle boun
         if (Vector2Length(force)) {
             boid->entity.velocity = Vector2Add(boid->entity.velocity, Vector2Scale(force, delta));
             boid->entity.velocity = Vector2Scale(Vector2Normalize(boid->entity.velocity), Clamp(Vector2Length(boid->entity.velocity), BOID_MIN_SPEED, BOID_MAX_SPEED));
+            // boids later in this loop see the updated velocity, as in the original pointer-based version
+            if (boidSlot[i] >= 0) {
+                sorted[boidSlot[i]].vx = boid->entity.velocity.x;
+                sorted[boidSlot[i]].vy = boid->entity.velocity.y;
+            }
         }
     }
-
-    aFree(&flockBoids);
 }
 
 void boidsMove(Array* boids, WaterBody* water, Rectangle outerBounds, Rectangle innerBounds, float delta) {
@@ -917,7 +915,9 @@ void boidsRender(Array* boids)
 {
     for ITERATE(i, boids->used) {
         Boid* boid = aGet(boids, i);
-        DrawCircle(boid->entity.position.x, boid->entity.position.y, BOID_RADIUS, COLOR_MAIN);
+        // DrawCircle uses 36 segments; at a 2px radius 8 looks identical and is ~5x cheaper to submit
+        Vector2 pixel = { (int)boid->entity.position.x, (int)boid->entity.position.y }; // DrawCircle snapped to ints
+        DrawCircleSector(pixel, BOID_RADIUS, 0, 360, 8, COLOR_MAIN);
     }
 }
 
@@ -1409,7 +1409,6 @@ int main(void) {
         clearDeadEntities(&currentWorld.splashParticles);
         clearDeadEntities(&currentWorld.bloodParticles);
 
-        clearBoidMap(&currentWorld.boidMap);
         populateBoidMap(&currentWorld.boidMap, &currentWorld.boids);
         boidsReact(&currentWorld.boids, &currentWorld.boidMap, &currentWorld.water, currentWorld.water.bounds, currentWorld.snake.entity.position, FIXED_DELTA);
         boidsMove(&currentWorld.boids, &currentWorld.water, currentWorld.bounds, currentWorld.water.bounds, FIXED_DELTA);

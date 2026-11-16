@@ -22,6 +22,12 @@
       ],
       "windows": {
         "miDebuggerPath": "${env:MINGW64}/bin/gdb.exe"
+      },
+      "linux": {
+        "program": "${workspaceFolder}/build/debug/game",
+        "preLaunchTask": "LINUX-DEBUG-build",
+        "externalConsole": false,
+        "miDebuggerPath": "/usr/bin/gdb"
       }
     },
     {
@@ -64,6 +70,12 @@
       ],
       "windows": {
         "miDebuggerPath": "${env:MINGW64}/bin/gdb.exe"
+      },
+      "linux": {
+        "program": "${workspaceFolder}/build/release/game",
+        "preLaunchTask": "LINUX-RELEASE-build",
+        "externalConsole": false,
+        "miDebuggerPath": "/usr/bin/gdb"
       }
     },
   ]
